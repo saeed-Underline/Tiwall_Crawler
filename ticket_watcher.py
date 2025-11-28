@@ -1,4 +1,4 @@
-import re
+import os
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
@@ -6,18 +6,21 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A3
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib.enums import TA_RIGHT, TA_LEFT
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib import colors
 
 import arabic_reshaper
 from bidi.algorithm import get_display
 import re
 import time
 from datetime import datetime, timedelta
+
+
 
 BOT_TOKEN = "8180945977:AAHIqAUWn4a0gtKC4Liv2lvYNN6D45rUCdE"
 CHAT_ID = "98337423"   # Your own Telegram user ID or group ID
@@ -26,6 +29,7 @@ CHAT_ID = "98337423"   # Your own Telegram user ID or group ID
 BASE_URL = "https://www.tiwall.com"
 SHOWCASE_URL = "https://www.tiwall.com/showcase?filters=city:2111,s:theater&order=rating"
 
+URL_RE = re.compile(r"(https?://\S+)")
 SESSION = requests.Session()
 SESSION.headers.update({
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -36,12 +40,10 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (compatible; TiwallScraper/1.0)",
 }
 
-
 PERSIAN_DIGITS = {
     "۰": "0", "۱": "1", "۲": "2", "۳": "3", "۴": "4",
     "۵": "5", "۶": "6", "۷": "7", "۸": "8", "۹": "9",
 }
-
 
 def persian_to_english(s: str) -> str:
     if not s:
@@ -54,7 +56,6 @@ def persian_to_english(s: str) -> str:
             out.append(ch)
     return "".join(out)
 
-
 def persian_to_int(s: str) -> Optional[int]:
     s_en = persian_to_english(s)
     s_en = "".join(c for c in s_en if c.isdigit())
@@ -64,12 +65,10 @@ def has_persian(text: str) -> bool:
     # Arabic/Persian Unicode range
     return bool(re.search(r"[\u0600-\u06FF]", text))
 
-
 def fetch_showcase_html() -> str:
     resp = SESSION.get(SHOWCASE_URL, timeout=20)
     resp.raise_for_status()
     return resp.text
-
 
 def parse_showcase(html: str) -> List[Dict[str, Any]]:
     """
@@ -325,7 +324,6 @@ def parse_tiwall_seats_from_html(html: str) -> List[Dict[str, Any]]:
 
     return seats
 
-
 def fetch_seatmap_json(slug: str, instance_id: int, sale_url: str) -> Dict[str, Any]:
     """
     Call Tiwall internal seatmap API and return JSON.
@@ -353,7 +351,6 @@ def fetch_seatmap_json(slug: str, instance_id: int, sale_url: str) -> Dict[str, 
     resp = SESSION.get(url, params=params, headers=headers, timeout=20)
     resp.raise_for_status()
     return resp.json()
-
 
 def parse_price_map(price_str: str) -> Dict[tuple, int]:
     """
@@ -463,7 +460,6 @@ def parse_sold_set(state_list: List[Dict[str, Any]]) -> set:
             sold.add(code)
     return sold
 
-
 def merge_seats_with_state_and_price(
     geometry: List[Dict[str, Any]],
     json_data: Dict[str, Any],
@@ -505,7 +501,6 @@ def merge_seats_with_state_and_price(
 
     return seats
 
-
 def build_seat_map(seats: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Group seats per row, sorted by row and seat number.
@@ -541,7 +536,6 @@ def build_seat_map(seats: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
     return seat_map
 
-
 def render_text_map(
     seat_map: List[Dict[str, Any]],
     free_status=("free", "available"),
@@ -573,7 +567,6 @@ def render_text_map(
     lines.append("Legend: A = available, X = sold, L = locked, ? = other")
     return "\n".join(lines)
 
-
 def scrape_show(sale_url: str) -> Dict[str, Any]:
     """
     For a single show (/s/<slug>):
@@ -590,7 +583,7 @@ def scrape_show(sale_url: str) -> Dict[str, Any]:
     sessions = parse_sessions(html)
     geometry = parse_tiwall_seats_from_html(html)
 
-    # derive slug from URL: https://www.tiwall.com/s/ghalbenarengi3
+    # derive slug from URL
     path = urlparse(sale_url).path
     slug = path.rstrip("/").split("/")[-1]
 
@@ -633,7 +626,7 @@ def scrape_show(sale_url: str) -> Dict[str, Any]:
         "text_map": default_text_map,
     }
 
-def compute_bayesian_scores(shows, m: int = 20):
+def compute_bayesian_scores(shows, m: int = 100):
     """
     Adds a 'score' field to each show dict using a Bayesian weighted rating.
     m = minimum votes to be fully trusted. Adjust to your taste (e.g. 20, 30).
@@ -658,25 +651,23 @@ def compute_bayesian_scores(shows, m: int = 20):
 
     return shows
 
+def has_persian(text: str) -> bool:
+    return bool(re.search(r"[\u0600-\u06FF]", text))
+
 def create_persian_report_pdf(report_text: str,
                               filename: str = "tiwall_report.pdf",
                               font_path: str = "Vazirmatn-Regular.ttf") -> None:
-    """
-    Create a multi-page PDF with:
-      - Proper shaping and RTL for Persian lines
-      - Left-aligned, normal layout for ASCII/seat map lines
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    font_full_path = os.path.join(base_dir, font_path)
 
-    report_text: the big string you already generate (with \n line breaks).
-    font_path: path to a TTF font that supports Persian (e.g. Vazirmatn-Regular.ttf).
-    """
+    if not os.path.exists(font_full_path):
+        raise FileNotFoundError(f"Font file not found: {font_full_path}")
 
-    # 1) Register Persian font
-    pdfmetrics.registerFont(TTFont("Vazir", font_path))
+    pdfmetrics.registerFont(TTFont("Vazir", font_full_path))
 
-    # 2) Setup document
     doc = SimpleDocTemplate(
         filename,
-        pagesize=A4,
+        pagesize=A3,
         rightMargin=40,
         leftMargin=40,
         topMargin=40,
@@ -685,24 +676,58 @@ def create_persian_report_pdf(report_text: str,
 
     styles = getSampleStyleSheet()
 
-    # Base style for Persian (right aligned)
+    # Title / section header (Persian)
+    style_title = ParagraphStyle(
+        "TitleFA",
+        parent=styles["Heading1"],
+        fontName="Vazir",
+        fontSize=36,
+        leading=22,
+        alignment=TA_RIGHT,
+        textColor=colors.HexColor("#1f4e79"),
+        backColor=colors.HexColor("#e6f2ff"),
+        spaceBefore=6,
+        spaceAfter=12,
+        borderPadding=4,
+    )
+
+    # Normal Persian text
     style_fa = ParagraphStyle(
         "Persian",
         parent=styles["Normal"],
         fontName="Vazir",
-        fontSize=11,
+        fontSize=26,
         leading=16,
         alignment=TA_RIGHT,
+        textColor=colors.HexColor("#222222"),
     )
 
-    # Base style for Latin/ASCII (left aligned) – for seat maps, URLs, etc.
+    # Latin / ASCII (for seat maps, debug info)
     style_en = ParagraphStyle(
         "Latin",
         parent=styles["Normal"],
-        fontName="Vazir",  # same font is fine, or use a Latin font if you want
-        fontSize=10,
+        fontName="Vazir",      # or "Helvetica"
+        fontSize=26,
         leading=14,
         alignment=TA_LEFT,
+        textColor=colors.HexColor("#333333"),
+    )
+
+    # Links (URLs)
+    style_link = ParagraphStyle(
+        "Link",
+        parent=style_en,
+        textColor=colors.HexColor("#1a73e8"),
+        underline=True,
+    )
+
+    # Seatmap style: monospaced feel + light background
+    style_seatmap = ParagraphStyle(
+        "Seatmap",
+        parent=style_en,
+        fontName="Courier",   # built-in monospace font
+        backColor=colors.HexColor("#f5f5f5"),
+        leading=12,
     )
 
     flow = []
@@ -710,36 +735,60 @@ def create_persian_report_pdf(report_text: str,
     for raw_line in report_text.splitlines():
         line = raw_line.rstrip()
 
-        # Empty line → add a small vertical space
+        # empty line => vertical space
         if not line:
             flow.append(Spacer(1, 6))
             continue
 
-        if has_persian(line):
-            # 3a) Persian line: reshape + bidi
+        # Detect "title" lines by a simple convention (you can tweak this):
+        # e.g. lines starting with "Show:" or "نمایش:"
+        is_title = line.startswith("Show:") or line.startswith("نمایش:")
+
+        # Seatmap lines: e.g. starting with "Row" or "صف"
+        is_seatmap = line.strip().startswith("Row") or line.strip().startswith("Stage")
+
+        # URL line?
+        url_match = URL_RE.search(line)
+
+        if has_persian(line) and not is_seatmap:
+            # Persian text (title or body)
             reshaped = arabic_reshaper.reshape(line)
             bidi_line = get_display(reshaped)
-            flow.append(Paragraph(bidi_line, style_fa))
-        else:
-            # 3b) Non-Persian (seat map, ASCII, URLs) – no shaping
-            # Escape angle brackets if any (to avoid XML errors in Paragraph)
-            safe_line = line.replace("<", "&lt;").replace(">", "&gt;")
-            flow.append(Paragraph(safe_line, style_en))
 
-    # 4) Build PDF (handles paging automatically)
+            style = style_title if is_title else style_fa
+            flow.append(Paragraph(bidi_line, style))
+
+        else:
+            # Non-Persian: seat maps or URLs or misc
+            if is_seatmap:
+                safe = line.replace("<", "&lt;").replace(">", "&gt;")
+                flow.append(Paragraph(safe, style_seatmap))
+            elif url_match:
+                # clickable link: wrap URL in <link>
+                url = url_match.group(1)
+                safe_line = line.replace("<", "&lt;").replace(">", "&gt;")
+                linked = safe_line.replace(
+                    url, f'<link href="{url}">{url}</link>'
+                )
+                flow.append(Paragraph(linked, style_link))
+            else:
+                safe = line.replace("<", "&lt;").replace(">", "&gt;")
+                flow.append(Paragraph(safe, style_en))
+
     doc.build(flow)
 
 def main():
     # 1) Get shows from showcase
     showcase_html = fetch_showcase_html()
     shows = parse_showcase(showcase_html)
-    shows = compute_bayesian_scores(shows, m=20)
+    shows = compute_bayesian_scores(shows, m=100)
     shows.sort(key=lambda s: s["score"], reverse=True)
     shows = shows[:10]
 
+    summary_text = build_front_row_summary(shows)
     # instead of printing directly, collect lines
     lines: List[str] = []
-    lines.append("Top 10 Tiwall Shows (by Bayesian score)")
+    lines.append("Top Tiwall Shows (by Bayesian score)")
     lines.append("=" * 60)
     lines.append("")
 
@@ -797,8 +846,7 @@ def main():
     # optional: also print where it was saved
     create_persian_report_pdf(report_text, "tiwall_report.pdf", font_path="Vazirmatn-Regular.ttf")
     print("PDF report written to tiwall_report.pdf")
-    send_pdf_to_telegram("tiwall_report.pdf", caption="🎭 گزارش کامل نمایش‌ها")
-
+    send_pdf_to_telegram("tiwall_report.pdf", caption=summary_text)
 
 def run_every_hour_at(minute=2):
     while True:
@@ -817,9 +865,41 @@ def run_every_hour_at(minute=2):
         # Run your job
         main()
 
+def build_front_row_summary(shows) -> str:
+    """
+    For each show, count how many sessions have free seats in row 1 or 2,
+    and build a short summary text for Telegram.
+    """
+    lines = []
+    lines.append("🎭 Shows with front-row availability:")
+    lines.append("")
 
+    for show in shows:
+        sale_url = show.get("sale_url")
+        if not sale_url:
+            continue
 
+        try:
+            data = scrape_show(sale_url)
+        except Exception as e:
+            # optional: log error, but skip this show in summary
+            continue
 
+        sessions = data.get("sessions", [])
+        count_front = sum(
+            1 for s in sessions
+            if s.get("has_front_row_free")
+        )
+
+        if count_front == 0:
+            continue  # skip shows with no good sessions
+
+        lines.append(f"show: {show['title']}")
+        lines.append(f"Session: {count_front}")
+        lines.append(f"Score: {show['score']:.3f}")
+        lines.append("")  # blank line between shows
+
+    return "\n".join(lines) if len(lines) > 2 else "No shows with free seats in row 1 or 2."
 
 def send_pdf_to_telegram(pdf_path: str, caption: str = ""):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
