@@ -681,7 +681,7 @@ def create_persian_report_pdf(report_text: str,
         "TitleFA",
         parent=styles["Heading1"],
         fontName="Vazir",
-        fontSize=36,
+        fontSize=24,
         leading=22,
         alignment=TA_RIGHT,
         textColor=colors.HexColor("#1f4e79"),
@@ -696,7 +696,7 @@ def create_persian_report_pdf(report_text: str,
         "Persian",
         parent=styles["Normal"],
         fontName="Vazir",
-        fontSize=26,
+        fontSize=18,
         leading=16,
         alignment=TA_RIGHT,
         textColor=colors.HexColor("#222222"),
@@ -707,7 +707,7 @@ def create_persian_report_pdf(report_text: str,
         "Latin",
         parent=styles["Normal"],
         fontName="Vazir",      # or "Helvetica"
-        fontSize=26,
+        fontSize=10,
         leading=14,
         alignment=TA_LEFT,
         textColor=colors.HexColor("#333333"),
@@ -819,8 +819,7 @@ def main():
                 continue  # skip sessions without front-row free seats
             status = "SOLD OUT" if sess["sold_out"] else (sess["status_text"] or "")
             lines.append(
-                f"  {sess['date_text']} {sess['time_text']}  -> {status} "
-                f"(instance_id={sess.get('instance_id')})"
+                f"  {sess['date_text']} "
             )
 
             if sess.get("seat_text_map"):
@@ -832,13 +831,13 @@ def main():
                 lines.append("")
 
         # Default seat map
-        lines.append("")
-        lines.append("Default seat map (first non-sold-out session, if any):")
-        lines.append("")
-        for seat_line in data["text_map"].splitlines():
-            lines.append("  " + seat_line)
-        lines.append("")
-        lines.append("")
+        # lines.append("")
+        # lines.append("Default seat map (first non-sold-out session, if any):")
+        # lines.append("")
+        # for seat_line in data["text_map"].splitlines():
+        #     lines.append("  " + seat_line)
+        # lines.append("")
+        # lines.append("")
 
     # join everything and write PDF
     report_text = "\n".join(lines)
