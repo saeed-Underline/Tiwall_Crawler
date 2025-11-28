@@ -830,6 +830,6 @@ def send_pdf_to_telegram(pdf_path: str, caption: str = ""):
         response.raise_for_status()
 
 if __name__ == "__main__":
-    # main()
-    run_every_hour_at(2)
+    main()
+    # run_every_hour_at(2)
 
