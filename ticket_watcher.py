@@ -23,11 +23,11 @@ from datetime import datetime, timedelta
 
 
 BOT_TOKEN = "8180945977:AAHIqAUWn4a0gtKC4Liv2lvYNN6D45rUCdE"
-CHAT_ID = "98337423"   # Your own Telegram user ID or group ID
+CHAT_ID = "-1003358233998"   # Your own Telegram user ID or group ID
 
 
 BASE_URL = "https://www.tiwall.com"
-SHOWCASE_URL = "https://www.tiwall.com/showcase?filters=city:2111,s:theater&order=rating"
+SHOWCASE_URL = "https://www.tiwall.com/showcase?filters=city:2111,s:theater,available:true&order=rating"
 
 URL_RE = re.compile(r"(https?://\S+)")
 SESSION = requests.Session()
@@ -85,6 +85,10 @@ def parse_showcase(html: str) -> List[Dict[str, Any]]:
         }
     """
     soup = BeautifulSoup(html, "html.parser")
+    # 🔥 Remove archived section if present
+    archived = soup.find("div", class_="archived-pages")
+    if archived:
+        archived.decompose()   # completely removes it from the DOM
     cards = soup.select("a.item-page")
 
     shows: List[Dict[str, Any]] = []
@@ -890,8 +894,8 @@ def build_front_row_summary(shows) -> str:
             if s.get("has_front_row_free")
         )
 
-        if count_front == 0:
-            continue  # skip shows with no good sessions
+        # if count_front == 0:
+            # continue  # skip shows with no good sessions
 
         lines.append(f"show: {show['title']}")
         lines.append(f"Session: {count_front}")
