@@ -923,7 +923,7 @@ def load_favorite_slugs() -> list[str]:
 
 
 if __name__ == "__main__":
-    # main()
+    main()
 
     favorite_slugs = load_favorite_slugs()
     lines = []
