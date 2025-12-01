@@ -24,7 +24,8 @@ from datetime import datetime, timedelta
 
 BOT_TOKEN = "8180945977:AAHIqAUWn4a0gtKC4Liv2lvYNN6D45rUCdE"
 CHAT_ID = "-1003358233998"   # Your own Telegram user ID or group ID
-
+CHAT_ID_2 = "-1003253814794"  # Another group ID for testing
+API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 BASE_URL = "https://www.tiwall.com"
 SHOWCASE_URL = "https://www.tiwall.com/showcase?filters=city:2111,s:theater,available:true&order=rating"
@@ -876,7 +877,7 @@ def build_front_row_summary(shows) -> str:
     lines = []
     lines.append("🎭 Shows with front-row availability:")
     lines.append("")
-
+    
     for show in shows:
         sale_url = show.get("sale_url")
         if not sale_url:
@@ -905,6 +906,7 @@ def build_front_row_summary(shows) -> str:
 
     return "\n".join(lines) if len(lines) > 2 else "No shows with free seats in row 1 or 2."
 
+
 def send_pdf_to_telegram(pdf_path: str, caption: str = ""):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
     with open(pdf_path, "rb") as pdf_file:
@@ -913,7 +915,42 @@ def send_pdf_to_telegram(pdf_path: str, caption: str = ""):
         response = requests.post(url, data=data, files=files)
         response.raise_for_status()
 
+def load_favorite_slugs() -> list[str]:
+    if not os.path.exists("favorite_shows.txt"):
+        return []
+    with open("favorite_shows.txt", "r", encoding="utf-8") as f:
+        return [line.strip() for line in f if line.strip()]
+
+
 if __name__ == "__main__":
     main()
+
+    favorite_slugs = load_favorite_slugs()
+    lines = []
+    for slug in favorite_slugs:
+        sale_url = f"https://www.tiwall.com/s/{slug}"
+        try:
+            data = scrape_show(sale_url)
+            sessions = data.get("sessions", [])
+            count_front = sum(
+                1 for s in sessions
+                if s.get("has_front_row_free")
+            )
+            if count_front == 0:
+                continue  # skip shows with no good sessions
+            lines.append(f"show: {data.get('title')}")
+            lines.append(f"link: {sale_url}")
+            lines.append(f"Session: {count_front}")
+            lines.append(f"Score: {data.get('score'):.3f}")
+            lines.append("") 
+            url = f"{API_URL}/sendMessage"
+            text_data = {
+                "chat_id": CHAT_ID_2,
+                "text": lines,
+            }
+            r = requests.post(url, json=text_data, timeout=10)
+            r.raise_for_status()
+        except Exception as e:
+            continue
     # run_every_hour_at(2)
 
