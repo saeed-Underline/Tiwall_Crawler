@@ -923,7 +923,7 @@ def load_favorite_slugs() -> list[str]:
 
 
 if __name__ == "__main__":
-    main()
+    # main()
 
     favorite_slugs = load_favorite_slugs()
     lines = []
@@ -938,17 +938,16 @@ if __name__ == "__main__":
             )
             if count_front == 0:
                 continue  # skip shows with no good sessions
-            lines.append(f"show: {data.get('title')}")
+            # lines.append(f"show: {data.get())"title",[])}")
             lines.append(f"link: {sale_url}")
             lines.append(f"Session: {count_front}")
-            lines.append(f"Score: {data.get('score'):.3f}")
-            lines.append("") 
+            # lines.append(f"Score: {data.get("score",[]):.3f}")
             url = f"{API_URL}/sendMessage"
             text_data = {
                 "chat_id": CHAT_ID_2,
                 "text": lines,
             }
-            r = requests.post(url, json=text_data, timeout=10)
+            r = requests.post(url, json=text_data)
             r.raise_for_status()
         except Exception as e:
             continue
