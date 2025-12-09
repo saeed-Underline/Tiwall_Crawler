@@ -907,7 +907,6 @@ def build_front_row_summary(shows) -> str:
 
     return "\n".join(lines) if len(lines) > 2 else "No shows with free seats in row 1 or 2."
 
-
 def send_pdf_to_telegram(pdf_path: str, caption: str = ""):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendDocument"
     with open(pdf_path, "rb") as pdf_file:
