@@ -460,6 +460,7 @@ def parse_sold_set(state_list: List[Dict[str, Any]]) -> set:
     sold = set()
     for item in state_list:
         code = item.get("c")
+        code = code.replace('همکف', 'A')
         status_flag = item.get("s")
         if code and status_flag == 1:
             sold.add(code)
