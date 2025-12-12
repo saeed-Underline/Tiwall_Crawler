@@ -272,19 +272,21 @@ def parse_tiwall_seats_from_html(html: str) -> List[Dict[str, Any]]:
     row_divs = soup.find_all("div", id=lambda x: x and x.startswith("zbsm-row-"))
 
     for row_div in row_divs:
-        row_label: Optional[int] = None
+        row_label: Optional[Any] = None
 
         # row id pattern
-        m = re.search(r"(\d+)$", row_div["id"])
+        m = re.search(r'^zbsm-row-([A-Za-z0-9]+)$', row_div["id"])
         if m:
-            row_label = int(m.group(1))
+            raw = m.group(1)
+            as_int = persian_to_int(raw)
+            row_label = as_int if as_int is not None else raw
 
         # or from <div class="row-head">۷</div>
         head = row_div.find("div", class_="row-head")
         if head:
-            maybe = persian_to_int(head.get_text(strip=True))
-            if maybe is not None:
-                row_label = maybe
+            head_txt = head.get_text(strip=True)
+            maybe = persian_to_int(head_txt)
+            row_label = maybe if maybe is not None else head_txt
 
         if row_label is None:
             continue
@@ -301,10 +303,14 @@ def parse_tiwall_seats_from_html(html: str) -> List[Dict[str, Any]]:
             row_from_id: Optional[int] = None
 
             # data-base-id format e.g. "A-7-16" (ZONE-ROW-SEAT)
-            m2 = re.match(r"([A-Z])-([0-9۰-۹]+)-([0-9۰-۹]+)", base_id)
+            m2 = re.match(r"([A-Z])-([A-Za-z0-9۰-۹]+)-([0-9۰-۹]+)", base_id)
             if m2:
                 zone = m2.group(1)
-                row_from_id = persian_to_int(m2.group(2))
+
+                row_raw = m2.group(2)
+                row_as_int = persian_to_int(row_raw)
+                row_from_id = row_as_int if row_as_int is not None else row_raw  # keep "A"/"B" etc.
+
                 seat_number = persian_to_int(m2.group(3))
 
             # fallback if something missing
@@ -609,7 +615,7 @@ def scrape_show(sale_url: str) -> Dict[str, Any]:
             sess["seat_text_map"] = render_text_map(seat_map)
             sess["seats"] = seats
             # 🔥 mark if this session has available seats in row 1 or 2 or 3
-            sess["has_front_row_free"] = has_available_front_rows(seats, front_rows=(1, 2, 3))
+            sess["has_front_row_free"] = has_available_front_rows(seats, front_rows=(1, 2, 3, 'A', 'B'))
         except Exception as e:
             sess["seat_text_map"] = f"Error fetching seatmap: {e}"
             sess["seats"] = []
