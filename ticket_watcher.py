@@ -615,7 +615,7 @@ def scrape_show(sale_url: str) -> Dict[str, Any]:
             sess["seat_text_map"] = render_text_map(seat_map)
             sess["seats"] = seats
             # 🔥 mark if this session has available seats in row 1 or 2 or 3
-            sess["has_front_row_free"] = has_available_front_rows(seats, front_rows=(1, 2, 3, 'A', 'B'))
+            sess["has_front_row_free"] = has_available_front_rows(seats, front_rows=(1, 2, 'A', 'B'))
         except Exception as e:
             sess["seat_text_map"] = f"Error fetching seatmap: {e}"
             sess["seats"] = []
