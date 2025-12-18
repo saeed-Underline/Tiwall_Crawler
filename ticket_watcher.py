@@ -654,7 +654,7 @@ def compute_bayesian_scores(shows, m: int = 100):
         R = s.get("rating")
         v = s.get("votes") or 0
 
-        if R is None or v == 0:
+        if R is None or v < m:
             s["score"] = 0  # or C, but 0 makes them sink
             continue
 
