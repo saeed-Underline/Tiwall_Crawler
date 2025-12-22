@@ -252,88 +252,93 @@ def has_available_front_rows(seats, front_rows=(1, 2)) -> bool:
 
 def parse_tiwall_seats_from_html(html: str) -> List[Dict[str, Any]]:
     """
-    Parse the seatmap geometry in a /s/<slug> page HTML.
-
-    We *do not* decide sold/free here; we just extract which seats exist.
-
-    Each seat:
-      {
-        "zone": "A",
-        "row": <int>,
-        "number": <int>,
-        "code": "A-4-15"
-      }
+    Parses seats but IGNORES those where the chair OR ITS PARENTS 
+    are hidden via CSS (display: none).
     """
     soup = BeautifulSoup(html, "html.parser")
-
     seats: List[Dict[str, Any]] = []
 
-    # We assume each row looks like: <div id="zbsm-row-7" class="row">...</div>
-    row_divs = soup.find_all("div", id=lambda x: x and x.startswith("zbsm-row-"))
+    all_chairs = soup.select("div.chair")
 
-    for row_div in row_divs:
-        row_label: Optional[Any] = None
-
-        # row id pattern
-        m = re.search(r'^zbsm-row-([A-Za-z0-9]+)$', row_div["id"])
-        if m:
-            raw = m.group(1)
-            as_int = persian_to_int(raw)
-            row_label = as_int if as_int is not None else raw
-
-        # or from <div class="row-head">۷</div>
-        head = row_div.find("div", class_="row-head")
-        if head:
-            head_txt = head.get_text(strip=True)
-            maybe = persian_to_int(head_txt)
-            row_label = maybe if maybe is not None else head_txt
-
-        if row_label is None:
+    for chair in all_chairs:
+        # 1. Check if the chair itself is hidden
+        if is_hidden(chair):
             continue
 
-        # Each seat is a <div class="chair ...">
-        for chair in row_div.find_all("div", class_="chair"):
-            inp = chair.find("input", {"name": "chair"})
-            if not inp:
-                continue
+        # 2. Check if the Parent Row is hidden
+        # We look up to 3 levels up to find the row container
+        parent = chair.parent
+        parent_hidden = False
+        for _ in range(3):
+            if parent is None:
+                break
+            if is_hidden(parent):
+                parent_hidden = True
+                break
+            parent = parent.parent
+        
+        if parent_hidden:
+            continue
 
-            base_id = inp.get("data-base-id") or inp.get("value", "")
-            zone: Optional[str] = None
-            seat_number: Optional[int] = None
-            row_from_id: Optional[int] = None
+        # --- Standard Extraction Logic ---
+        inp = chair.find("input", {"name": "chair"})
+        if not inp:
+            continue
 
-            # data-base-id format e.g. "A-7-16" (ZONE-ROW-SEAT)
-            m2 = re.match(r"([A-Z])-([A-Za-z0-9۰-۹]+)-([0-9۰-۹]+)", base_id)
-            if m2:
-                zone = m2.group(1)
+        base_id = inp.get("data-base-id") or inp.get("value", "")
+        
+        zone: Optional[str] = None
+        row_label: Optional[Any] = None
+        seat_number: Optional[int] = None
 
-                row_raw = m2.group(2)
-                row_as_int = persian_to_int(row_raw)
-                row_from_id = row_as_int if row_as_int is not None else row_raw  # keep "A"/"B" etc.
+        m = re.match(r"^(.+)-([^-]+)-([0-9۰-۹]+)$", base_id)
+        
+        if m:
+            zone = m.group(1)
+            row_raw = m.group(2)
+            seat_raw = m.group(3)
 
-                seat_number = persian_to_int(m2.group(3))
+            row_as_int = persian_to_int(row_raw)
+            row_label = row_as_int if row_as_int is not None else row_raw
+            seat_number = persian_to_int(seat_raw)
+        else:
+            seat_txt = chair.get_text(strip=True)
+            seat_number = persian_to_int(seat_txt)
+            if seat_number is not None:
+                zone = "Unknown"
+                row_label = 0
 
-            # fallback if something missing
-            if seat_number is None:
-                seat_txt = chair.get_text(strip=True)
-                seat_number = persian_to_int(seat_txt)
+        if zone is None or seat_number is None or row_label is None:
+            continue
 
-            if row_from_id is not None:
-                row_label = row_from_id
+        code = f"{zone}-{row_label}-{seat_number}"
 
-            if zone is None or seat_number is None or row_label is None:
-                continue
-
-            code = f"{zone}-{row_label}-{seat_number}"
-
-            seats.append({
-                "zone": zone,
-                "row": row_label,
-                "number": seat_number,
-                "code": code,
-            })
+        seats.append({
+            "zone": zone,
+            "row": row_label,
+            "number": seat_number,
+            "code": code,
+        })
 
     return seats
+
+def is_hidden(tag) -> bool:
+    """Helper to check if a BS4 tag is hidden via style or class."""
+    if not tag:
+        return False
+        
+    # Check inline style
+    style = tag.get("style", "").replace(" ", "").lower()
+    if "display:none" in style or "visibility:hidden" in style:
+        return True
+        
+    # Check classes
+    classes = tag.get("class", [])
+    # Common Tiwall classes for hidden elements
+    if any(c in classes for c in ["hidden", "d-none", "deleted", "invisible"]):
+        return True
+        
+    return False
 
 def fetch_seatmap_json(slug: str, instance_id: int, sale_url: str) -> Dict[str, Any]:
     """
@@ -579,49 +584,120 @@ def render_text_map(
     lines.append("Legend: A = available, X = sold, L = locked, ? = other")
     return "\n".join(lines)
 
+def fetch_sessions_from_api(slug: str) -> List[Dict[str, Any]]:
+    """
+    Fallback: Fetch sessions from Tiwall API.
+    Useful for interactive shows or when HTML parsing returns 0 sessions.
+    """
+    # Note: This endpoint is a common pattern. If it 404s, Tiwall might use a different one.
+    # You can verify the exact URL by inspecting Network traffic in your browser (F12).
+    url = f"https://www.tiwall.com/api/v1/projects/{slug}/variations"
+    
+    try:
+        headers = {
+            "Accept": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36",
+            "Referer": f"https://www.tiwall.com/s/{slug}",
+            "X-Requested-With": "XMLHttpRequest"
+        }
+        resp = SESSION.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            return []
+            
+        data = resp.json()
+        sessions = []
+        
+        # Adjust 'items' key based on actual API response structure
+        items = data.get('data', {}).get('items', []) or data.get('items', [])
+        
+        for item in items:
+            inst_id = item.get('id')
+            # Extract name/date. API often returns "Day Month Time" in 'name' or 'title'
+            name = item.get('name') or item.get('title') or "Unknown Date"
+            
+            # Check sale status
+            is_sold_out = item.get('sales_finished', False) or item.get('sold_out', False)
+            status_text = "SOLD OUT" if is_sold_out else "Available"
+
+            sessions.append({
+                "raw_text": name,
+                "date_text": name, 
+                "time_text": None, # Regex parsing could be added here if needed
+                "status_text": status_text,
+                "sold_out": is_sold_out,
+                "extra_capacity": False,
+                "instance_id": inst_id,
+                # We initialize this as False; scrape_show will update it
+                "has_front_row_free": False 
+            })
+            
+        return sessions
+    except Exception as e:
+        print(f"API fallback warning for {slug}: {e}")
+        return []
+    
 def scrape_show(sale_url: str) -> Dict[str, Any]:
-    """
-    For a single show (/s/<slug>):
-
-    - Fetch page
-    - Parse sessions list (with instance_id)
-    - Parse seat geometry (HTML) once
-    - For each session that has an instance_id and is not sold out:
-        * Call seatmapState API
-        * Merge JSON state + price with geometry
-        * Build a text seat map
-    """
     html = fetch_show_page(sale_url)
-    sessions = parse_sessions(html)
-    geometry = parse_tiwall_seats_from_html(html)
+    
+    # 1. Extract Title
+    soup = BeautifulSoup(html, "html.parser")
+    title_tag = soup.find('h1')
+    show_title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
 
-    # derive slug from URL
+    # 2. Derive slug
     path = urlparse(sale_url).path
     slug = path.rstrip("/").split("/")[-1]
 
-    # Build seatmaps per session
+    # 3. Try Standard HTML Parsing for Sessions
+    sessions = parse_sessions(html)
+
+    # 4. [NEW STRATEGY] If HTML found 0 sessions, try the API
+    if not sessions:
+        # print(f"HTML found 0 sessions for {slug}. Attempting API fallback...")
+        api_sessions = fetch_sessions_from_api(slug)
+        if api_sessions:
+            sessions = api_sessions
+            # print(f"API found {len(sessions)} sessions.")
+
+    # 5. Parse Geometry (Seat Map)
+    geometry = parse_tiwall_seats_from_html(html)
+
+    # 6. Process each session
     for sess in sessions:
         inst_id = sess.get("instance_id")
+        
+        # Skip if invalid ID or explicitly sold out
         if not inst_id or sess.get("sold_out"):
             sess["seat_text_map"] = None
             sess["seats"] = []
             sess["has_front_row_free"] = False
             continue
 
+        # --- CRITICAL FIX for Show 257 (General Admission) ---
+        # If the page has NO seat map (geometry is empty), but the session is Available,
+        # we treat it as having "front row" availability.
+        if not geometry:
+            sess["seat_text_map"] = "General Admission (No Seat Map)"
+            sess["seats"] = []
+            sess["has_front_row_free"] = True 
+            continue
+        # -----------------------------------------------------
+
         try:
-            json_data = json_data = fetch_seatmap_json(slug, inst_id, sale_url)
+            # Standard logic: Fetch seatmap JSON and merge with geometry
+            json_data = fetch_seatmap_json(slug, inst_id, sale_url)
             seats = merge_seats_with_state_and_price(geometry, json_data)
             seat_map = build_seat_map(seats)
             sess["seat_text_map"] = render_text_map(seat_map)
             sess["seats"] = seats
-            # 🔥 mark if this session has available seats in row 1 or 2 or 3
+            # Check for actual seat availability in rows 1, 2, A, B
             sess["has_front_row_free"] = has_available_front_rows(seats, front_rows=(1, 2, 'A', 'B'))
         except Exception as e:
             sess["seat_text_map"] = f"Error fetching seatmap: {e}"
             sess["seats"] = []
             sess["has_front_row_free"] = False
 
-    # For backward compatibility: pick a default text_map (first with seat_text_map)
+    # For backward compatibility (report generation)
     default_text_map = None
     for sess in sessions:
         if sess.get("seat_text_map"):
@@ -631,6 +707,7 @@ def scrape_show(sale_url: str) -> Dict[str, Any]:
         default_text_map = "No seatmap available for any session."
 
     return {
+        "title": show_title,
         "sale_url": sale_url,
         "slug": slug,
         "sessions": sessions,
