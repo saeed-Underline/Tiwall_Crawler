@@ -952,6 +952,32 @@ def run_every_hour_at(minute=2):
 
         # Run your job
         main()
+        favorite_slugs = load_favorite_slugs()
+        lines = []
+        for slug in favorite_slugs:
+            sale_url = f"https://www.tiwall.com/s/{slug}"
+            try:
+                data = scrape_show(sale_url)
+                sessions = data.get("sessions", [])
+                count_front = sum(
+                    1 for s in sessions
+                    if s.get("has_front_row_free")
+                )
+                if count_front == 0:
+                    continue  # skip shows with no good sessions
+                # lines.append(f"show: {data.get())"title",[])}")
+                lines.append(f"link: {sale_url}")
+                lines.append(f"Session: {count_front}")
+                # lines.append(f"Score: {data.get("score",[]):.3f}")
+                url = f"{API_URL}/sendMessage"
+                text_data = {
+                    "chat_id": CHAT_ID_2,
+                    "text": lines,
+                }
+                r = requests.post(url, json=text_data)
+                r.raise_for_status()
+            except Exception as e:
+                continue
 
 def build_front_row_summary(shows) -> str:
     """
@@ -1006,33 +1032,5 @@ def load_favorite_slugs() -> list[str]:
 
 
 if __name__ == "__main__":
-    main()
-
-    favorite_slugs = load_favorite_slugs()
-    lines = []
-    for slug in favorite_slugs:
-        sale_url = f"https://www.tiwall.com/s/{slug}"
-        try:
-            data = scrape_show(sale_url)
-            sessions = data.get("sessions", [])
-            count_front = sum(
-                1 for s in sessions
-                if s.get("has_front_row_free")
-            )
-            if count_front == 0:
-                continue  # skip shows with no good sessions
-            # lines.append(f"show: {data.get())"title",[])}")
-            lines.append(f"link: {sale_url}")
-            lines.append(f"Session: {count_front}")
-            # lines.append(f"Score: {data.get("score",[]):.3f}")
-            url = f"{API_URL}/sendMessage"
-            text_data = {
-                "chat_id": CHAT_ID_2,
-                "text": lines,
-            }
-            r = requests.post(url, json=text_data)
-            r.raise_for_status()
-        except Exception as e:
-            continue
-    # run_every_hour_at(2)
+    run_every_hour_at(2)
 
