@@ -3,7 +3,7 @@ name: Tiwall Watcher
 on:
   schedule:
     # runs at minute 2 of every hour, UTC
-    - cron: "9 * * * *"
+    #- cron: "9 * * * *"
   # optional: allow manual run from GitHub UI
   workflow_dispatch:
 
