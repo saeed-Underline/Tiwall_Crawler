@@ -12,8 +12,10 @@ jobs:
     runs-on: ubuntu-latest
 
     env:
-      TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-      TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      CHAT_ID_REPORT: ${{ secrets.CHAT_ID_REPORT }}
+      CHAT_ID_ALERTS: ${{ secrets.CHAT_ID_ALERTS }}
+        run: python app.py
 
     steps:
       - name: Check out repo
@@ -31,4 +33,4 @@ jobs:
 
       - name: Run ticket watcher
         run: |
-          python ticket_watcher.py
+          python app.py
