@@ -502,9 +502,9 @@ def perform_hourly_job():
             continue
 
         # Add to PDF Report
-        report_lines.append(f"Show: {details['title']}")
-        report_lines.append(f"Score: {show['score']:.2f} | Rating: {show['rating']} | Votes: {show['votes']}")
-        report_lines.append(f"URL: {show['sale_url']}")
+        report_lines.append(f"🎭: {details['title']}")
+        report_lines.append(f"⭐: {show['score']:.2f} | Rating: {show['rating']} | Votes: {show['votes']}")
+        report_lines.append(f"🌐: {show['sale_url']}")
         
         available_sessions = [s for s in details["sessions"] if s["has_front_row_free"]]
         
@@ -512,9 +512,9 @@ def perform_hourly_job():
             report_lines.append("No front row seats available.")
         else:
             # Add to Summary for Telegram Caption
-            summary_lines.append(f"🔸 {details['title']}")
-            summary_lines.append(f"   Score: {show['score']:.2f} | Sessions: {len(available_sessions)}")
-            summary_lines.append(f"   Link: {show['sale_url']}\n")
+            summary_lines.append(f"🎭 {details['title']}")
+            summary_lines.append(f"   ⭐: {show['score']:.2f} | 🗓️: {len(available_sessions)}")
+            summary_lines.append(f"   🌐: {show['sale_url']}\n")
 
             for sess in available_sessions:
                 report_lines.append(f"  📅 {sess['date_text']} ({sess['status_text']})")
