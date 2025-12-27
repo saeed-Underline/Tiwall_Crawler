@@ -947,7 +947,12 @@ def run_every_hour_at(minute=2):
 
         wait_seconds = (next_run - now).total_seconds()
         print(f"Next run at {next_run}. Sleeping {int(wait_seconds)}s...")
-
+        url = f"{API_URL}/sendMessage"
+                text_data = {
+                    "chat_id": CHAT_ID_2,
+                    "text": f"Next run at {next_run}. Sleeping {int(wait_seconds)}s...",
+                }
+        r = requests.post(url, json=text_data)
         time.sleep(wait_seconds)
 
         # Run your job
