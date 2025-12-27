@@ -15,7 +15,6 @@ jobs:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       CHAT_ID_REPORT: ${{ secrets.CHAT_ID_REPORT }}
       CHAT_ID_ALERTS: ${{ secrets.CHAT_ID_ALERTS }}
-        run: python app.py
 
     steps:
       - name: Check out repo
