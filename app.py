@@ -371,13 +371,29 @@ class TiwallScraper:
                     code = item.get("c", "").replace('همکف', 'A')
                     sold_set.add(code)
 
+            # Parse locked/reserved seats. Format: comma-separated "ZONE-ROW-START:END=TYPE"
+            # entries, e.g. "A-1-7:12=r" locks seats A-1-7 .. A-1-12. A single seat may omit ":END".
+            # These are held/reserved and are NOT actually buyable, so they must not count as free.
             locked_set = set()
-            # Simple lock parsing (heuristic based on 'locks' string format)
-            if locks_str := json_data.get("locks", ""):
-                 # Simplified: just capturing the raw codes is complex, 
-                 # we assume if it's not sold, it might be free unless locked logic is strictly required.
-                 # (Keeping original logic minimal for brevity unless specified)
-                 pass
+            for token in (json_data.get("locks", "") or "").split(","):
+                token = token.strip()
+                if not token:
+                    continue
+                base = token.split("=", 1)[0].replace('همکف', 'A')  # drop "=r" type suffix
+                left, _, end_raw = base.partition(":")              # split optional range end
+                m = re.match(r"^(.+)-([^-]+)-([0-9۰-۹]+)$", left)
+                if not m:
+                    continue
+                zone, row_raw, start_raw = m.groups()
+                row = persian_to_int(row_raw) or row_raw            # match geometry's row format
+                start = persian_to_int(start_raw)
+                end = persian_to_int(end_raw) if end_raw else start
+                if start is None:
+                    continue
+                if end is None or end < start:
+                    end = start
+                for n in range(start, end + 1):
+                    locked_set.add(f"{zone}-{row}-{n}")
 
             # Merge
             final_seats = []
@@ -387,9 +403,14 @@ class TiwallScraper:
             rows_dict = {} # For text map generation
 
             for g in geometry:
-                status = "sold" if g["code"] in sold_set else "free"
-                
-                # Check Front Row Availability
+                if g["code"] in sold_set:
+                    status = "sold"
+                elif g["code"] in locked_set:
+                    status = "locked"   # reserved/held -> not buyable
+                else:
+                    status = "free"
+
+                # Front-row availability counts ONLY genuinely free seats (not sold, not locked)
                 if status == "free" and g["row"] in front_rows:
                     has_front = True
                 
@@ -413,7 +434,7 @@ class TiwallScraper:
         
         for r in sorted_rows:
             seats = sorted(rows_dict[r], key=lambda x: x["number"])
-            chars = "".join("X" if s["status"] == "sold" else "A" for s in seats)
+            chars = "".join({"sold": "X", "locked": "L"}.get(s["status"], "A") for s in seats)
             lines.append(f"Row {r:>2}: {chars}")
             
         return "\n".join(lines)
