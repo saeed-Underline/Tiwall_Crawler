@@ -22,12 +22,16 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 # CONFIGURATION & CONSTANTS
 # ==========================================
 
-BOT_TOKEN = "8180945977:AAHIqAUWn4a0gtKC4Liv2lvYNN6D45rUCdE"
-API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+# Secrets are injected via environment variables (see .github/workflows/tiwall-watcher.yml).
+# Never hardcode credentials here; this is a public repository.
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
+CHAT_ID_REPORT = os.environ.get("CHAT_ID_REPORT", "")   # Group for PDF reports
+CHAT_ID_ALERTS = os.environ.get("CHAT_ID_ALERTS", "")   # Group for favorite show alerts
 
-# Chat IDs
-CHAT_ID_REPORT = "-1003358233998"   # Group for PDF reports
-CHAT_ID_ALERTS = "-1003253814794"  # Group for favorite show alerts
+if not BOT_TOKEN:
+    raise SystemExit("BOT_TOKEN environment variable is not set. Configure it as a repository secret.")
+
+API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
 # Tiwall URLs
 BASE_URL = "https://www.tiwall.com"
