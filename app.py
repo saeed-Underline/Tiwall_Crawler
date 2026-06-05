@@ -350,7 +350,7 @@ class TiwallScraper:
         # Case: General Admission (No seat map in HTML)
         if not geometry:
             sess["seat_text_map"] = "General Admission (No Seat Map)"
-            sess["has_front_row_free"] = True
+            sess["has_front_row_free"] = False  # General admission has no rows; do not claim front-row availability
             return
 
         try:
