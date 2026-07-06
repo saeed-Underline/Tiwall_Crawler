@@ -2,12 +2,14 @@ import json
 import os
 import re
 import time
-import anthropic
 import requests
 import arabic_reshaper
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
+
+from google import genai
+from google.genai import types as genai_types, errors as genai_errors
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -36,9 +38,10 @@ if not BOT_TOKEN:
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 
-# Optional: enables Claude-researched public-opinion remarks in the channel
+# Optional: enables Gemini-researched public-opinion remarks in the channel
 # summary. When unset, the job runs normally without remarks.
-ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GEMINI_MODEL = "gemini-2.5-flash"
 OPINION_BANK_FILE = "opinion_bank.json"
 TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
@@ -465,8 +468,11 @@ class TiwallScraper:
 
 
 # ==========================================
-# SHOW OPINION RESEARCH (Claude API)
+# SHOW OPINION RESEARCH (Gemini API)
 # ==========================================
+
+class OpinionAuthError(Exception):
+    """Raised when the Gemini API key is invalid — no point retrying this run."""
 
 def load_opinion_bank() -> Dict:
     """Loads the daily opinion cache; resets it on the first run of a new Tehran day."""
@@ -484,8 +490,8 @@ def save_opinion_bank(bank: Dict):
     with open(OPINION_BANK_FILE, "w", encoding="utf-8") as f:
         json.dump(bank, f, ensure_ascii=False, indent=2)
 
-def get_show_opinion(client: "anthropic.Anthropic", title: str) -> Optional[str]:
-    """Asks Claude (with web search) for a brief Persian remark on the show's public reception."""
+def get_show_opinion(client: "genai.Client", title: str) -> Optional[str]:
+    """Asks Gemini (with Google Search grounding) for a brief Persian remark on the show's public reception."""
     prompt = (
         f"نمایش «{title}» هم‌اکنون در تهران روی صحنه است. "
         "با جستجو در وب، نظر عمومی مخاطبان و منتقدان ایرانی درباره این نمایش را بررسی کن "
@@ -494,30 +500,28 @@ def get_show_opinion(client: "anthropic.Anthropic", title: str) -> Optional[str]
         "اگر اطلاعات کافی پیدا نکردی، فقط بنویس: اطلاعاتی از بازخورد این نمایش در دسترس نیست."
     )
     try:
-        response = client.messages.create(
-            model="claude-opus-4-8",
-            max_tokens=2000,
-            thinking={"type": "adaptive"},
-            tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}],
-            messages=[{"role": "user", "content": prompt}],
+        response = client.models.generate_content(
+            model=GEMINI_MODEL,
+            contents=prompt,
+            config=genai_types.GenerateContentConfig(
+                tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
+            ),
         )
-        text = " ".join(
-            block.text.strip() for block in response.content
-            if block.type == "text" and block.text.strip()
-        ).strip()
+        text = (response.text or "").strip()
         return text or None
-    except anthropic.AuthenticationError as e:
-        # Bad/revoked key — no point retrying any show this run
-        print(f"Opinion research: invalid API key ({e.message}); disabling for this run.")
-        raise
-    except anthropic.RateLimitError:
-        print(f"Opinion research rate-limited for '{title}'; will retry next hour.")
-        return None
-    except (anthropic.APIConnectionError, anthropic.APIStatusError) as e:
-        # Network failure / timeout / server error — skip, retry next hour
+    except genai_errors.APIError as e:
+        # Invalid key surfaces as 400 "API key not valid" or 401/403
+        if e.code in (401, 403) or "API key not valid" in str(e):
+            print(f"Opinion research: invalid API key ({e}); disabling for this run.")
+            raise OpinionAuthError() from e
+        if e.code == 429:
+            print(f"Opinion research rate-limited for '{title}'; will retry next hour.")
+            return None
+        # Other client/server errors — skip, retry next hour
         print(f"Opinion research failed for '{title}': {e}")
         return None
     except Exception as e:
+        # Network failures, timeouts, unexpected response shapes
         print(f"Opinion research unexpected error for '{title}': {e}")
         return None
 
@@ -595,15 +599,17 @@ def perform_hourly_job():
     report_lines = ["Top Tiwall Shows Report", "=" * 30, ""]
     summary_lines = ["🎭 **Top Shows with Front Row Availability:**", ""]
 
-    # Daily cache of Claude-researched public-opinion remarks (reset each Tehran day)
+    # Daily cache of Gemini-researched public-opinion remarks (reset each Tehran day)
     opinion_bank = load_opinion_bank()
-    if ANTHROPIC_API_KEY:
-        # Bounded timeout/retries: web-search calls can be slow, but a hung API
-        # must not stall the hourly job (SDK defaults are 10 min x 2 retries).
-        claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=120.0, max_retries=1)
+    if GEMINI_API_KEY:
+        # Bounded timeout (ms): a hung API must not stall the hourly job.
+        gemini_client = genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=genai_types.HttpOptions(timeout=120_000),
+        )
     else:
-        claude_client = None
-        print("ANTHROPIC_API_KEY not set; skipping show opinion research.")
+        gemini_client = None
+        print("GEMINI_API_KEY not set; skipping show opinion research.")
     opinion_failures = 0
     MAX_OPINION_FAILURES = 3  # stop researching this run if the API keeps failing
 
@@ -629,12 +635,12 @@ def perform_hourly_job():
             # Research opinion only for shows that make it into the summary,
             # and only if not already researched today.
             slug = details["slug"]
-            if slug not in opinion_bank["opinions"] and claude_client and opinion_failures < MAX_OPINION_FAILURES:
+            if slug not in opinion_bank["opinions"] and gemini_client and opinion_failures < MAX_OPINION_FAILURES:
                 print(f"Researching public opinion for {details['title']}...")
                 try:
-                    remark = get_show_opinion(claude_client, details["title"])
-                except anthropic.AuthenticationError:
-                    claude_client = None  # key is bad; don't try the remaining shows
+                    remark = get_show_opinion(gemini_client, details["title"])
+                except OpinionAuthError:
+                    gemini_client = None  # key is bad; don't try the remaining shows
                     remark = None
                 if remark:  # a failed lookup stays absent so the next run retries
                     opinion_bank["opinions"][slug] = remark
