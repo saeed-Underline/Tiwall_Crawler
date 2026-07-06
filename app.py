@@ -576,10 +576,16 @@ def perform_hourly_job():
     fav_file = "favorite_shows.txt"
     if os.path.exists(fav_file):
         print("Checking favorite shows...")
+        # Each line: "slug" or "slug | excluded date | excluded date ...".
+        # Sessions whose date contains an excluded date are not alerted on.
+        favorites = []
         with open(fav_file, "r", encoding="utf-8") as f:
-            slugs = [line.strip() for line in f if line.strip()]
-        
-        for slug in slugs:
+            for line in f:
+                parts = [p.strip() for p in line.split("|") if p.strip()]
+                if parts:
+                    favorites.append((parts[0], parts[1:]))
+
+        for slug, excluded_dates in favorites:
             url = f"{BASE_URL}/s/{slug}"
             try:
                 try:
@@ -588,7 +594,16 @@ def perform_hourly_job():
                     # Page is gone (404) or unreachable — skip and move on.
                     print(f"Favorite '{slug}' page not available, skipping.")
                     continue
-                good_sessions = [s for s in data["sessions"] if s.get("has_front_row_free")]
+                good_sessions = [
+                    s for s in data["sessions"]
+                    if s.get("has_front_row_free")
+                    # Compare with digits normalized so exclusions work whether
+                    # typed as "19 تیر" or "۱۹ تیر".
+                    and not any(
+                        persian_to_english(x) in persian_to_english(s["date_text"])
+                        for x in excluded_dates
+                    )
+                ]
 
                 if good_sessions:
                     session_lines = []
