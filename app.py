@@ -570,18 +570,39 @@ def create_persian_pdf(content: str, filename: str, font_path: str = "Vazirmatn-
 
     doc.build(story)
 
+TELEGRAM_CAPTION_LIMIT = 1024
+TELEGRAM_TEXT_LIMIT = 4096
+
+def _split_message(text: str, limit: int) -> List[str]:
+    """Splits text into chunks under the limit, breaking at line boundaries."""
+    chunks, current = [], ""
+    for line in text.split("\n"):
+        candidate = f"{current}\n{line}" if current else line
+        if len(candidate) <= limit:
+            current = candidate
+        else:
+            if current:
+                chunks.append(current)
+            # A single line longer than the limit gets hard-cut
+            current = line[:limit]
+    if current:
+        chunks.append(current)
+    return chunks
+
 def send_telegram_message(chat_id: str, text: str = None, file_path: str = None):
     """Sends a text message or a document to Telegram."""
     if file_path:
         url = f"{API_URL}/sendDocument"
+        # Telegram rejects captions over 1024 chars with a 400
+        caption = text[:TELEGRAM_CAPTION_LIMIT] if text else None
         with open(file_path, "rb") as f:
-            data = {"chat_id": chat_id, "caption": text}
+            data = {"chat_id": chat_id, "caption": caption}
             files = {"document": f}
             requests.post(url, data=data, files=files).raise_for_status()
     elif text:
         url = f"{API_URL}/sendMessage"
-        data = {"chat_id": chat_id, "text": text}
-        requests.post(url, json=data).raise_for_status()
+        for chunk in _split_message(text, TELEGRAM_TEXT_LIMIT):
+            requests.post(url, json={"chat_id": chat_id, "text": chunk}).raise_for_status()
 
 
 # ==========================================
@@ -674,8 +695,11 @@ def perform_hourly_job():
     if len(summary_lines) <= 2:
         summary_text = "No top shows have front row seats available right now."
 
-    print("Sending PDF report...")
-    send_telegram_message(CHAT_ID_REPORT, text=summary_text, file_path=pdf_filename)
+    print("Sending summary and PDF report...")
+    # Summary goes as a text message (4096 limit, auto-split); the caption
+    # limit on documents is only 1024 chars, which remarks easily exceed.
+    send_telegram_message(CHAT_ID_REPORT, text=summary_text)
+    send_telegram_message(CHAT_ID_REPORT, text="📄 Full seat map report", file_path=pdf_filename)
 
 
     # --- Task 2: Favorite Shows Alert ---
