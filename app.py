@@ -1,10 +1,13 @@
+import json
 import os
 import re
 import time
+import anthropic
 import requests
 import arabic_reshaper
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
+from zoneinfo import ZoneInfo
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
@@ -32,6 +35,12 @@ if not BOT_TOKEN:
     raise SystemExit("BOT_TOKEN environment variable is not set. Configure it as a repository secret.")
 
 API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
+
+# Optional: enables Claude-researched public-opinion remarks in the channel
+# summary. When unset, the job runs normally without remarks.
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+OPINION_BANK_FILE = "opinion_bank.json"
+TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 # Tiwall URLs
 BASE_URL = "https://www.tiwall.com"
@@ -456,6 +465,64 @@ class TiwallScraper:
 
 
 # ==========================================
+# SHOW OPINION RESEARCH (Claude API)
+# ==========================================
+
+def load_opinion_bank() -> Dict:
+    """Loads the daily opinion cache; resets it on the first run of a new Tehran day."""
+    today = datetime.now(TEHRAN_TZ).strftime("%Y-%m-%d")
+    try:
+        with open(OPINION_BANK_FILE, "r", encoding="utf-8") as f:
+            bank = json.load(f)
+        if bank.get("date") == today and isinstance(bank.get("opinions"), dict):
+            return bank
+    except (OSError, ValueError):
+        pass
+    return {"date": today, "opinions": {}}
+
+def save_opinion_bank(bank: Dict):
+    with open(OPINION_BANK_FILE, "w", encoding="utf-8") as f:
+        json.dump(bank, f, ensure_ascii=False, indent=2)
+
+def get_show_opinion(client: "anthropic.Anthropic", title: str) -> Optional[str]:
+    """Asks Claude (with web search) for a brief Persian remark on the show's public reception."""
+    prompt = (
+        f"نمایش «{title}» هم‌اکنون در تهران روی صحنه است. "
+        "با جستجو در وب، نظر عمومی مخاطبان و منتقدان ایرانی درباره این نمایش را بررسی کن "
+        "(نقدها، امتیازها و واکنش‌ها در تیوال و شبکه‌های اجتماعی). "
+        "فقط یک تا دو جمله کوتاه به فارسی درباره استقبال از این نمایش بنویس، بدون هیچ مقدمه یا توضیح اضافه. "
+        "اگر اطلاعات کافی پیدا نکردی، فقط بنویس: اطلاعاتی از بازخورد این نمایش در دسترس نیست."
+    )
+    try:
+        response = client.messages.create(
+            model="claude-opus-4-8",
+            max_tokens=2000,
+            thinking={"type": "adaptive"},
+            tools=[{"type": "web_search_20260209", "name": "web_search", "max_uses": 3}],
+            messages=[{"role": "user", "content": prompt}],
+        )
+        text = " ".join(
+            block.text.strip() for block in response.content
+            if block.type == "text" and block.text.strip()
+        ).strip()
+        return text or None
+    except anthropic.AuthenticationError as e:
+        # Bad/revoked key — no point retrying any show this run
+        print(f"Opinion research: invalid API key ({e.message}); disabling for this run.")
+        raise
+    except anthropic.RateLimitError:
+        print(f"Opinion research rate-limited for '{title}'; will retry next hour.")
+        return None
+    except (anthropic.APIConnectionError, anthropic.APIStatusError) as e:
+        # Network failure / timeout / server error — skip, retry next hour
+        print(f"Opinion research failed for '{title}': {e}")
+        return None
+    except Exception as e:
+        print(f"Opinion research unexpected error for '{title}': {e}")
+        return None
+
+
+# ==========================================
 # REPORT GENERATION & NOTIFICATION
 # ==========================================
 
@@ -528,6 +595,18 @@ def perform_hourly_job():
     report_lines = ["Top Tiwall Shows Report", "=" * 30, ""]
     summary_lines = ["🎭 **Top Shows with Front Row Availability:**", ""]
 
+    # Daily cache of Claude-researched public-opinion remarks (reset each Tehran day)
+    opinion_bank = load_opinion_bank()
+    if ANTHROPIC_API_KEY:
+        # Bounded timeout/retries: web-search calls can be slow, but a hung API
+        # must not stall the hourly job (SDK defaults are 10 min x 2 retries).
+        claude_client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY, timeout=120.0, max_retries=1)
+    else:
+        claude_client = None
+        print("ANTHROPIC_API_KEY not set; skipping show opinion research.")
+    opinion_failures = 0
+    MAX_OPINION_FAILURES = 3  # stop researching this run if the API keeps failing
+
     for show in top_shows:
         if not show["sale_url"]: continue
         
@@ -547,9 +626,29 @@ def perform_hourly_job():
         if not available_sessions:
             report_lines.append("No front row seats available.")
         else:
+            # Research opinion only for shows that make it into the summary,
+            # and only if not already researched today.
+            slug = details["slug"]
+            if slug not in opinion_bank["opinions"] and claude_client and opinion_failures < MAX_OPINION_FAILURES:
+                print(f"Researching public opinion for {details['title']}...")
+                try:
+                    remark = get_show_opinion(claude_client, details["title"])
+                except anthropic.AuthenticationError:
+                    claude_client = None  # key is bad; don't try the remaining shows
+                    remark = None
+                if remark:  # a failed lookup stays absent so the next run retries
+                    opinion_bank["opinions"][slug] = remark
+                    opinion_failures = 0
+                else:
+                    opinion_failures += 1
+                    if opinion_failures >= MAX_OPINION_FAILURES:
+                        print("Opinion research failing repeatedly; skipping for the rest of this run.")
+
             # Add to Summary for Telegram Caption
             summary_lines.append(f"🎭 {details['title']}")
             summary_lines.append(f"   ⭐: {show['score']:.2f} | 🗓️: {len(available_sessions)}")
+            if remark := opinion_bank["opinions"].get(slug):
+                summary_lines.append(f"   💬 {remark}")
             summary_lines.append(f"   🌐: {show['sale_url']}\n")
 
             for sess in available_sessions:
@@ -558,6 +657,8 @@ def perform_hourly_job():
                     report_lines.append("\n" + sess['seat_text_map'] + "\n")
         
         report_lines.append("-" * 30)
+
+    save_opinion_bank(opinion_bank)
 
     # Generate and Send PDF
     pdf_filename = "tiwall_report.pdf"

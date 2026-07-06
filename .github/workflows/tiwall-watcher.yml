@@ -15,10 +15,24 @@ jobs:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       CHAT_ID_REPORT: ${{ secrets.CHAT_ID_REPORT }}
       CHAT_ID_ALERTS: ${{ secrets.CHAT_ID_ALERTS }}
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
     steps:
       - name: Check out repo
         uses: actions/checkout@v5
+
+      - name: Get Tehran date
+        id: date
+        run: echo "today=$(TZ=Asia/Tehran date +%F)" >> "$GITHUB_OUTPUT"
+
+      # Persists the daily opinion bank between hourly runs. The date in the
+      # key means a new Tehran day starts with an empty bank.
+      - name: Restore opinion bank
+        uses: actions/cache@v4
+        with:
+          path: opinion_bank.json
+          key: opinion-bank-${{ steps.date.outputs.today }}-${{ github.run_id }}
+          restore-keys: opinion-bank-${{ steps.date.outputs.today }}-
 
       - name: Set up Python
         uses: actions/setup-python@v6
