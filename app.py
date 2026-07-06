@@ -201,6 +201,11 @@ class TiwallScraper:
         soup = BeautifulSoup(html, "html.parser")
         title_tag = soup.find('h1')
         title = title_tag.get_text(strip=True) if title_tag else "Unknown Title"
+        # The h1 is a breadcrumb like "نمایش›TITLE›خرید" — keep only the show name.
+        if "›" in title:
+            parts = [p.strip() for p in title.split("›") if p.strip()]
+            if len(parts) >= 3:
+                title = "›".join(parts[1:-1])
 
         # 1. Get Sessions (Try HTML first, fallback to API)
         sessions = self._parse_sessions_html(soup)
@@ -401,8 +406,10 @@ class TiwallScraper:
 
             # Merge
             final_seats = []
-            front_rows = {1, 2, "1", "2", "A", "B"}
-            has_front = False
+            front_rows = {1, 2, 3, "1", "2", "3", "A", "B", "C"}
+            # Free seat numbers in front rows, grouped by (zone, row) so adjacency
+            # is only checked within the same physical row.
+            front_free: Dict = {}
 
             rows_dict = {} # For text map generation
 
@@ -415,16 +422,20 @@ class TiwallScraper:
                     status = "free"
 
                 # Front-row availability counts ONLY genuinely free seats (not sold, not locked)
-                if status == "free" and g["row"] in front_rows:
-                    has_front = True
-                
+                if status == "free" and g["row"] in front_rows and g["number"] is not None:
+                    front_free.setdefault((g["zone"], g["row"]), set()).add(g["number"])
+
                 # Group for map
                 if g["row"] not in rows_dict: rows_dict[g["row"]] = []
                 rows_dict[g["row"]].append({"status": status, "number": g["number"]})
-                
+
                 final_seats.append({**g, "status": status})
 
-            sess["has_front_row_free"] = has_front
+            # Flag only if a pair of adjacent free seats exists in a front row,
+            # so two people can sit next to each other.
+            sess["has_front_row_free"] = any(
+                n + 1 in numbers for numbers in front_free.values() for n in numbers
+            )
             sess["seats"] = final_seats
             sess["seat_text_map"] = self._render_text_map(rows_dict)
 
@@ -571,14 +582,31 @@ def perform_hourly_job():
         for slug in slugs:
             url = f"{BASE_URL}/s/{slug}"
             try:
-                data = scraper.scrape_show_details(url)
-                good_sessions = sum(1 for s in data["sessions"] if s.get("has_front_row_free"))
-                
-                if good_sessions > 0:
+                try:
+                    data = scraper.scrape_show_details(url)
+                except ValueError:
+                    # Page is gone (404) or unreachable — skip and move on.
+                    print(f"Favorite '{slug}' page not available, skipping.")
+                    continue
+                good_sessions = [s for s in data["sessions"] if s.get("has_front_row_free")]
+
+                if good_sessions:
+                    session_lines = []
+                    for s in good_sessions[:5]:
+                        # date_text often already ends with "› <time>"; strip it to avoid
+                        # repeating the time we append explicitly.
+                        date_part = re.sub(r"[›>]\s*[0-9۰-۹]{1,2}[:٫][0-9۰-۹]{2}\s*$", "", s["date_text"]).strip()
+                        line = f"  📅 {date_part}"
+                        if s.get("time_text"):
+                            line += f" 🕒 {s['time_text']}"
+                        session_lines.append(line)
+                    if len(good_sessions) > 5:
+                        session_lines.append(f"  … and {len(good_sessions) - 5} more")
                     alert_msg = (
                         f"🚨 **Favorite Show Alert**\n"
-                        f"Show: {data['title']}\n"
-                        f"Sessions with Front Rows: {good_sessions}\n"
+                        f"{data['title']}\n"
+                        f"Sessions with Front Rows: {len(good_sessions)}\n"
+                        + "\n".join(session_lines) + "\n"
                         f"Link: {url}"
                     )
                     send_telegram_message(CHAT_ID_ALERTS, text=alert_msg)
