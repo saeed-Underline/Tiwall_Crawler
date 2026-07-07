@@ -512,26 +512,34 @@ def save_show_info(info: Dict[str, Dict]):
     with open(INFORMATION_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
-def get_shows_info_batch(client: "genai.Client", shows: List[Tuple[str, str]]) -> Dict[str, str]:
-    """Asks Gemini (one request, with Google Search grounding) for brief Persian
-    remarks on the public reception of several shows. Returns {slug: remark}."""
-    listing = "\n".join(f"{slug} | {title}" for slug, title in shows)
+NO_FEEDBACK_MARKER = "یافت نشد"  # Gemini's "no reliable feedback" fallback
+
+def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str, str]:
+    """Asks Gemini (one request, with Google Search grounding) for brief critical
+    Persian remarks on the public reception of several shows. Each show dict has
+    slug/title/rating/votes. Returns {slug: remark}."""
+    listing_lines = []
+    for s in shows:
+        line = f"{s['slug']} | {s['title']}"
+        if s.get("rating"):
+            line += f" | امتیاز تیوال: {s['rating']} از 5 ({s.get('votes') or '?'} رای)"
+        listing_lines.append(line)
+    listing = "\n".join(listing_lines)
     prompt = (
         "نمایش‌های زیر هم‌اکنون در تهران روی صحنه هستند. "
+        "امتیاز واقعی هر نمایش در سایت تیوال هم داده شده است. "
         "برای هر نمایش با جستجو در وب، بازخورد واقعی تماشاگران و منتقدان ایرانی را پیدا کن "
-        "(نقدها، امتیازها و نظرات در تیوال، شبکه‌های اجتماعی و رسانه‌ها).\n"
+        "(نقدها و نظرات در تیوال، شبکه‌های اجتماعی و رسانه‌ها).\n"
         "مانند یک منتقد تئاتر بی‌طرف و سخت‌گیر عمل کن:\n"
-        "- فقط بر اساس نظرات واقعی که پیدا کردی بنویس؛ هیچ تعریفی از خودت اضافه نکن.\n"
+        "- امتیاز تیوال داده‌شده را مبنا قرار بده و در جمله‌ات بیاور؛ با جستجو نقاط قوت و ضعف مشخص را پیدا کن.\n"
         "- نقاط ضعف و نقدهای منفی را به همان اندازه نقاط قوت ذکر کن. "
         "اگر بازخوردها متفاوت یا متوسط است، صادقانه بنویس نظرها دوپهلوست و ضعف اصلی را نام ببر.\n"
-        "- از صفت‌های تبلیغاتی و کلی مثل «عالی» و «بی‌نظیر» بدون استناد به نظر واقعی خودداری کن. "
-        "اگر امتیاز مشخصی (مثلاً در تیوال) پیدا کردی، آن را بنویس.\n"
-        "- اگر بازخورد واقعی و قابل اعتمادی پیدا نکردی، فقط بنویس: بازخورد قابل اعتمادی یافت نشد. "
-        "چیزی حدس نزن و نساز.\n"
+        "- از صفت‌های تبلیغاتی و کلی مثل «عالی» و «بی‌نظیر» بدون استناد به نظر واقعی خودداری کن.\n"
+        "- فقط اگر هیچ نظر کیفی پیدا نکردی و امتیازی هم داده نشده، بنویس: بازخورد قابل اعتمادی یافت نشد.\n"
         "پاسخ را دقیقاً در همین قالب بده: برای هر نمایش فقط یک خط، به شکل\n"
         "slug | یک تا دو جمله کوتاه به فارسی درباره بازخورد و کیفیت واقعی نمایش\n"
         "از همان slug انگلیسی که داده شده استفاده کن و هیچ متن دیگری ننویس.\n\n"
-        f"فهرست نمایش‌ها (slug | عنوان):\n{listing}"
+        f"فهرست نمایش‌ها:\n{listing}"
     )
     try:
         response = client.models.generate_content(
@@ -549,7 +557,7 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Tuple[str, str]]) -
         print(f"Batch opinion research unexpected error: {e}")
         return {}
 
-    valid_slugs = {slug for slug, _ in shows}
+    valid_slugs = {s["slug"] for s in shows}
     results: Dict[str, str] = {}
     for line in text.splitlines():
         if "|" not in line:
@@ -557,7 +565,9 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Tuple[str, str]]) -
         slug, _, remark = line.partition("|")
         slug = slug.strip().lstrip("-*•").strip()
         remark = " ".join(remark.split())  # collapse whitespace/newlines
-        if slug in valid_slugs and remark:
+        # "no feedback found" is a miss, not an answer — don't bank it for 14
+        # days; leave the show absent so the next run retries.
+        if slug in valid_slugs and remark and NO_FEEDBACK_MARKER not in remark:
             results[slug] = remark
     missed = valid_slugs - set(results)
     if missed:
@@ -684,6 +694,8 @@ def perform_hourly_job():
                 "slug": details["slug"],
                 "title": details["title"],
                 "score": show["score"],
+                "rating": show["rating"],
+                "votes": show["votes"],
                 "session_count": len(available_sessions),
                 "url": show["sale_url"],
             })
@@ -699,7 +711,7 @@ def perform_hourly_job():
     show_info = load_show_info()
     today = datetime.now(TEHRAN_TZ).date()
     missing = [
-        (s["slug"], s["title"]) for s in summary_shows
+        s for s in summary_shows
         if s["slug"] not in show_info
         or (today - show_info[s["slug"]]["date"]).days > INFO_MAX_AGE_DAYS
     ]
@@ -710,7 +722,7 @@ def perform_hourly_job():
                 api_key=GEMINI_API_KEY,
                 http_options=genai_types.HttpOptions(timeout=240_000),
             )
-            print(f"Researching {len(missing)} shows in one batch: {', '.join(s for s, _ in missing)}")
+            print(f"Researching {len(missing)} shows in one batch: {', '.join(s['slug'] for s in missing)}")
             new_remarks = get_shows_info_batch(gemini_client, missing)
             for slug, remark in new_remarks.items():
                 show_info[slug] = {"date": today, "remark": remark}
