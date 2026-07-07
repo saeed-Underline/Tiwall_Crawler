@@ -500,7 +500,9 @@ def load_show_info() -> Dict[str, Dict]:
             else:
                 remark = " | ".join(p for p in parts[1:] if p)
                 date = datetime.now(TEHRAN_TZ).date()
-            if slug and remark:
+            # Legacy "no feedback found" lines are misses, not answers — drop
+            # them so the show gets re-researched.
+            if slug and remark and NO_FEEDBACK_MARKER not in remark:
                 info[slug] = {"date": date, "remark": remark}
     return info
 
