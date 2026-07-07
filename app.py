@@ -1,4 +1,3 @@
-import json
 import os
 import re
 import time
@@ -42,7 +41,8 @@ API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # summary. When unset, the job runs normally without remarks.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GEMINI_MODEL = "gemini-2.5-flash"
-OPINION_BANK_FILE = "opinion_bank.json"
+INFORMATION_FILE = "information.txt"   # persistent show-feedback bank, committed to the repo
+INFO_MAX_AGE_DAYS = 14                 # re-research a show after this many days
 TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 # Tiwall URLs
@@ -471,33 +471,60 @@ class TiwallScraper:
 # SHOW OPINION RESEARCH (Gemini API)
 # ==========================================
 
-class OpinionAuthError(Exception):
-    """Raised when the Gemini API key is invalid — no point retrying this run."""
+def load_show_info() -> Dict[str, Dict]:
+    """Loads the persistent show-feedback bank.
 
-def load_opinion_bank() -> Dict:
-    """Loads the daily opinion cache; resets it on the first run of a new Tehran day."""
-    today = datetime.now(TEHRAN_TZ).strftime("%Y-%m-%d")
-    try:
-        with open(OPINION_BANK_FILE, "r", encoding="utf-8") as f:
-            bank = json.load(f)
-        if bank.get("date") == today and isinstance(bank.get("opinions"), dict):
-            return bank
-    except (OSError, ValueError):
-        pass
-    return {"date": today, "opinions": {}}
+    Line format: "slug | YYYY-MM-DD | remark". Hand-added lines may omit the
+    date ("slug | remark") and are treated as researched today.
+    """
+    info: Dict[str, Dict] = {}
+    if not os.path.exists(INFORMATION_FILE):
+        return info
+    with open(INFORMATION_FILE, "r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = [p.strip() for p in line.split("|", 2)]
+            if len(parts) < 2:
+                continue
+            slug = parts[0]
+            date = None
+            if len(parts) == 3:
+                try:
+                    date = datetime.strptime(parts[1], "%Y-%m-%d").date()
+                except ValueError:
+                    pass
+            if date is not None:
+                remark = parts[2]
+            else:
+                remark = " | ".join(p for p in parts[1:] if p)
+                date = datetime.now(TEHRAN_TZ).date()
+            if slug and remark:
+                info[slug] = {"date": date, "remark": remark}
+    return info
 
-def save_opinion_bank(bank: Dict):
-    with open(OPINION_BANK_FILE, "w", encoding="utf-8") as f:
-        json.dump(bank, f, ensure_ascii=False, indent=2)
+def save_show_info(info: Dict[str, Dict]):
+    lines = ["# Show feedback bank — format: slug | researched date | remark", ""]
+    for slug in sorted(info):
+        entry = info[slug]
+        lines.append(f"{slug} | {entry['date'].strftime('%Y-%m-%d')} | {entry['remark']}")
+    with open(INFORMATION_FILE, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
 
-def get_show_opinion(client: "genai.Client", title: str) -> Optional[str]:
-    """Asks Gemini (with Google Search grounding) for a brief Persian remark on the show's public reception."""
+def get_shows_info_batch(client: "genai.Client", shows: List[Tuple[str, str]]) -> Dict[str, str]:
+    """Asks Gemini (one request, with Google Search grounding) for brief Persian
+    remarks on the public reception of several shows. Returns {slug: remark}."""
+    listing = "\n".join(f"{slug} | {title}" for slug, title in shows)
     prompt = (
-        f"نمایش «{title}» هم‌اکنون در تهران روی صحنه است. "
-        "با جستجو در وب، نظر عمومی مخاطبان و منتقدان ایرانی درباره این نمایش را بررسی کن "
-        "(نقدها، امتیازها و واکنش‌ها در تیوال و شبکه‌های اجتماعی). "
-        "فقط یک تا دو جمله کوتاه به فارسی درباره استقبال از این نمایش بنویس، بدون هیچ مقدمه یا توضیح اضافه. "
-        "اگر اطلاعات کافی پیدا نکردی، فقط بنویس: اطلاعاتی از بازخورد این نمایش در دسترس نیست."
+        "نمایش‌های زیر هم‌اکنون در تهران روی صحنه هستند. "
+        "برای هر نمایش با جستجو در وب، نظر عمومی مخاطبان و منتقدان ایرانی و کیفیت اجرا را بررسی کن "
+        "(نقدها، امتیازها و واکنش‌ها در تیوال و شبکه‌های اجتماعی).\n"
+        "پاسخ را دقیقاً در همین قالب بده: برای هر نمایش فقط یک خط، به شکل\n"
+        "slug | یک تا دو جمله کوتاه به فارسی درباره استقبال و کیفیت نمایش\n"
+        "از همان slug انگلیسی که داده شده استفاده کن و هیچ متن دیگری ننویس. "
+        "اگر برای نمایشی اطلاعات کافی پیدا نکردی بنویس: اطلاعاتی از بازخورد این نمایش در دسترس نیست.\n\n"
+        f"فهرست نمایش‌ها (slug | عنوان):\n{listing}"
     )
     try:
         response = client.models.generate_content(
@@ -507,23 +534,28 @@ def get_show_opinion(client: "genai.Client", title: str) -> Optional[str]:
                 tools=[genai_types.Tool(google_search=genai_types.GoogleSearch())],
             ),
         )
-        text = (response.text or "").strip()
-        return text or None
+        text = response.text or ""
     except genai_errors.APIError as e:
-        # Invalid key surfaces as 400 "API key not valid" or 401/403
-        if e.code in (401, 403) or "API key not valid" in str(e):
-            print(f"Opinion research: invalid API key ({e}); disabling for this run.")
-            raise OpinionAuthError() from e
-        if e.code == 429:
-            print(f"Opinion research rate-limited for '{title}'; will retry next hour.")
-            return None
-        # Other client/server errors — skip, retry next hour
-        print(f"Opinion research failed for '{title}': {e}")
-        return None
+        print(f"Batch opinion research failed: {e}")
+        return {}
     except Exception as e:
-        # Network failures, timeouts, unexpected response shapes
-        print(f"Opinion research unexpected error for '{title}': {e}")
-        return None
+        print(f"Batch opinion research unexpected error: {e}")
+        return {}
+
+    valid_slugs = {slug for slug, _ in shows}
+    results: Dict[str, str] = {}
+    for line in text.splitlines():
+        if "|" not in line:
+            continue
+        slug, _, remark = line.partition("|")
+        slug = slug.strip().lstrip("-*•").strip()
+        remark = " ".join(remark.split())  # collapse whitespace/newlines
+        if slug in valid_slugs and remark:
+            results[slug] = remark
+    missed = valid_slugs - set(results)
+    if missed:
+        print(f"Batch opinion research got no answer for: {', '.join(sorted(missed))}")
+    return results
 
 
 # ==========================================
@@ -620,23 +652,11 @@ def perform_hourly_job():
     report_lines = ["Top Tiwall Shows Report", "=" * 30, ""]
     summary_lines = ["🎭 **Top Shows with Front Row Availability:**", ""]
 
-    # Daily cache of Gemini-researched public-opinion remarks (reset each Tehran day)
-    opinion_bank = load_opinion_bank()
-    if GEMINI_API_KEY:
-        # Bounded timeout (ms): a hung API must not stall the hourly job.
-        gemini_client = genai.Client(
-            api_key=GEMINI_API_KEY,
-            http_options=genai_types.HttpOptions(timeout=120_000),
-        )
-    else:
-        gemini_client = None
-        print("GEMINI_API_KEY not set; skipping show opinion research.")
-    opinion_failures = 0
-    MAX_OPINION_FAILURES = 3  # stop researching this run if the API keeps failing
+    summary_shows = []  # shows that will appear in the Telegram summary
 
     for show in top_shows:
         if not show["sale_url"]: continue
-        
+
         try:
             details = scraper.scrape_show_details(show["sale_url"])
         except Exception as e:
@@ -647,45 +667,58 @@ def perform_hourly_job():
         report_lines.append(f"🎭: {details['title']}")
         report_lines.append(f"⭐: {show['score']:.2f} | Rating: {show['rating']} | Votes: {show['votes']}")
         report_lines.append(f"🌐: {show['sale_url']}")
-        
+
         available_sessions = [s for s in details["sessions"] if s["has_front_row_free"]]
-        
+
         if not available_sessions:
             report_lines.append("No front row seats available.")
         else:
-            # Research opinion only for shows that make it into the summary,
-            # and only if not already researched today.
-            slug = details["slug"]
-            if slug not in opinion_bank["opinions"] and gemini_client and opinion_failures < MAX_OPINION_FAILURES:
-                print(f"Researching public opinion for {details['title']}...")
-                try:
-                    remark = get_show_opinion(gemini_client, details["title"])
-                except OpinionAuthError:
-                    gemini_client = None  # key is bad; don't try the remaining shows
-                    remark = None
-                if remark:  # a failed lookup stays absent so the next run retries
-                    opinion_bank["opinions"][slug] = remark
-                    opinion_failures = 0
-                else:
-                    opinion_failures += 1
-                    if opinion_failures >= MAX_OPINION_FAILURES:
-                        print("Opinion research failing repeatedly; skipping for the rest of this run.")
-
-            # Add to Summary for Telegram Caption
-            summary_lines.append(f"🎭 {details['title']}")
-            summary_lines.append(f"   ⭐: {show['score']:.2f} | 🗓️: {len(available_sessions)}")
-            if remark := opinion_bank["opinions"].get(slug):
-                summary_lines.append(f"   💬 {remark}")
-            summary_lines.append(f"   🌐: {show['sale_url']}\n")
+            summary_shows.append({
+                "slug": details["slug"],
+                "title": details["title"],
+                "score": show["score"],
+                "session_count": len(available_sessions),
+                "url": show["sale_url"],
+            })
 
             for sess in available_sessions:
                 report_lines.append(f"  📅 {sess['date_text']} ({sess['status_text']})")
                 if sess['seat_text_map']:
                     report_lines.append("\n" + sess['seat_text_map'] + "\n")
-        
+
         report_lines.append("-" * 30)
 
-    save_opinion_bank(opinion_bank)
+    # --- Opinion research: one batched Gemini call for shows without fresh info ---
+    show_info = load_show_info()
+    today = datetime.now(TEHRAN_TZ).date()
+    missing = [
+        (s["slug"], s["title"]) for s in summary_shows
+        if s["slug"] not in show_info
+        or (today - show_info[s["slug"]]["date"]).days > INFO_MAX_AGE_DAYS
+    ]
+    if missing:
+        if GEMINI_API_KEY:
+            # Bounded timeout (ms): a hung API must not stall the hourly job.
+            gemini_client = genai.Client(
+                api_key=GEMINI_API_KEY,
+                http_options=genai_types.HttpOptions(timeout=240_000),
+            )
+            print(f"Researching {len(missing)} shows in one batch: {', '.join(s for s, _ in missing)}")
+            new_remarks = get_shows_info_batch(gemini_client, missing)
+            for slug, remark in new_remarks.items():
+                show_info[slug] = {"date": today, "remark": remark}
+            if new_remarks:
+                save_show_info(show_info)
+        else:
+            print("GEMINI_API_KEY not set; skipping show opinion research.")
+
+    # Build the Telegram summary (stale entries keep showing until re-researched)
+    for s in summary_shows:
+        summary_lines.append(f"🎭 {s['title']}")
+        summary_lines.append(f"   ⭐: {s['score']:.2f} | 🗓️: {s['session_count']}")
+        if entry := show_info.get(s["slug"]):
+            summary_lines.append(f"   💬 {entry['remark']}")
+        summary_lines.append(f"   🌐: {s['url']}\n")
 
     # Generate and Send PDF
     pdf_filename = "tiwall_report.pdf"

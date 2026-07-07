@@ -11,6 +11,10 @@ jobs:
   scrape:
     runs-on: ubuntu-latest
 
+    # Needed to commit information.txt (show feedback bank) back to the repo
+    permissions:
+      contents: write
+
     env:
       BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
       CHAT_ID_REPORT: ${{ secrets.CHAT_ID_REPORT }}
@@ -20,19 +24,6 @@ jobs:
     steps:
       - name: Check out repo
         uses: actions/checkout@v5
-
-      - name: Get Tehran date
-        id: date
-        run: echo "today=$(TZ=Asia/Tehran date +%F)" >> "$GITHUB_OUTPUT"
-
-      # Persists the daily opinion bank between hourly runs. The date in the
-      # key means a new Tehran day starts with an empty bank.
-      - name: Restore opinion bank
-        uses: actions/cache@v4
-        with:
-          path: opinion_bank.json
-          key: opinion-bank-${{ steps.date.outputs.today }}-${{ github.run_id }}
-          restore-keys: opinion-bank-${{ steps.date.outputs.today }}-
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -47,3 +38,16 @@ jobs:
       - name: Run ticket watcher
         run: |
           python app.py
+
+      - name: Commit updated show information bank
+        run: |
+          git add information.txt
+          if git diff --cached --quiet; then
+            echo "No new show information."
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Update information.txt (show feedback bank)"
+            git pull --rebase origin main
+            git push
+          fi
