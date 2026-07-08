@@ -2,7 +2,6 @@ import os
 import re
 import time
 import requests
-import arabic_reshaper
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 from zoneinfo import ZoneInfo
@@ -12,15 +11,6 @@ from google.genai import types as genai_types, errors as genai_errors
 from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
-from bidi.algorithm import get_display
-
-from reportlab.lib import colors
-from reportlab.lib.enums import TA_RIGHT, TA_LEFT
-from reportlab.lib.pagesizes import A3
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.pdfbase import pdfmetrics
-from reportlab.pdfbase.ttfonts import TTFont
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 
 # ==========================================
 # CONFIGURATION & CONSTANTS
@@ -29,7 +19,7 @@ from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer
 # Secrets are injected via environment variables (see .github/workflows/tiwall-watcher.yml).
 # Never hardcode credentials here; this is a public repository.
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
-CHAT_ID_REPORT = os.environ.get("CHAT_ID_REPORT", "")   # Group for PDF reports
+CHAT_ID_REPORT = os.environ.get("CHAT_ID_REPORT", "")   # Group for the top-shows summary
 CHAT_ID_ALERTS = os.environ.get("CHAT_ID_ALERTS", "")   # Group for favorite show alerts
 
 if not BOT_TOKEN:
@@ -83,10 +73,6 @@ def persian_to_int(text: str) -> Optional[int]:
     en_text = persian_to_english(text)
     digits = "".join(c for c in en_text if c.isdigit())
     return int(digits) if digits else None
-
-def has_persian_chars(text: str) -> bool:
-    """Checks if the string contains Persian/Arabic characters."""
-    return bool(re.search(r"[\u0600-\u06FF]", text))
 
 def is_element_hidden(tag) -> bool:
     """Checks if a BeautifulSoup tag is visually hidden via CSS classes or inline styles."""
@@ -474,10 +460,10 @@ class TiwallScraper:
 def load_show_info() -> Dict[str, Dict]:
     """Loads the persistent show-feedback bank.
 
-    Line format: "slug | YYYY-MM-DD | brief | detail". Older lines with a
-    single remark ("slug | date | remark") keep it as the brief with no
-    detail. Hand-added lines may omit the date ("slug | brief [| detail]")
-    and are treated as researched today.
+    Line format: "slug | YYYY-MM-DD | remark". Older 4-field lines
+    ("slug | date | brief | detail") load the detail (falling back to the
+    brief). Hand-added lines may omit the date ("slug | remark") and are
+    treated as researched today.
     """
     info: Dict[str, Dict] = {}
     if not os.path.exists(INFORMATION_FILE):
@@ -498,36 +484,31 @@ def load_show_info() -> Dict[str, Dict]:
                 except ValueError:
                     pass
             if date is not None:
-                brief = parts[2]
-                detail = parts[3] if len(parts) == 4 else ""
+                # 4-field legacy lines: prefer the detailed remark
+                remark = (parts[3] if len(parts) == 4 and parts[3] else parts[2])
             else:
                 date = datetime.now(TEHRAN_TZ).date()
-                brief = parts[1]
-                detail = parts[2] if len(parts) >= 3 else ""
+                remark = " | ".join(p for p in parts[1:] if p)
             # Legacy "no feedback found" lines are misses, not answers — drop
             # them so the show gets re-researched.
-            if slug and brief and NO_FEEDBACK_MARKER not in brief:
-                info[slug] = {"date": date, "brief": brief, "detail": detail}
+            if slug and remark and NO_FEEDBACK_MARKER not in remark:
+                info[slug] = {"date": date, "remark": remark}
     return info
 
 def save_show_info(info: Dict[str, Dict]):
-    lines = ["# Show feedback bank — format: slug | researched date | brief | detail", ""]
+    lines = ["# Show feedback bank — format: slug | researched date | remark", ""]
     for slug in sorted(info):
         entry = info[slug]
-        lines.append(
-            f"{slug} | {entry['date'].strftime('%Y-%m-%d')} | {entry['brief']} | {entry.get('detail', '')}"
-        )
+        lines.append(f"{slug} | {entry['date'].strftime('%Y-%m-%d')} | {entry['remark']}")
     with open(INFORMATION_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
 NO_FEEDBACK_MARKER = "یافت نشد"  # Gemini's "no reliable feedback" fallback
 
-def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str, Dict[str, str]]:
-    """Asks Gemini (one request, with Google Search grounding) for critical
-    Persian remarks on the public reception of several shows: a one-sentence
-    brief (for the Telegram summary) and a fuller critique (for the PDF).
-    Each show dict has slug/title/rating/votes.
-    Returns {slug: {"brief": ..., "detail": ...}}."""
+def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str, str]:
+    """Asks Gemini (one request, with Google Search grounding) for a detailed
+    critical Persian remark on the public reception of each show. Each show
+    dict has slug/title/rating/votes. Returns {slug: remark}."""
     listing_lines = []
     for s in shows:
         line = f"{s['slug']} | {s['title']}"
@@ -546,10 +527,10 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str,
         "اگر بازخوردها متفاوت یا متوسط است، صادقانه بنویس نظرها دوپهلوست و ضعف اصلی را نام ببر.\n"
         "- از صفت‌های تبلیغاتی و کلی مثل «عالی» و «بی‌نظیر» بدون استناد به نظر واقعی خودداری کن.\n"
         "- فقط اگر هیچ نظر کیفی پیدا نکردی و امتیازی هم داده نشده، بنویس: بازخورد قابل اعتمادی یافت نشد.\n"
-        "پاسخ را دقیقاً در همین قالب بده: برای هر نمایش فقط یک خط با دو بخش جداشده با |، به شکل\n"
-        "slug | خلاصه‌ای در ۳ تا ۴ جمله درباره کیفیت نمایش و بازخوردها | نقد کامل در یک پاراگراف مفصل (حدود ۶ تا ۸ جمله) "
+        "پاسخ را دقیقاً در همین قالب بده: برای هر نمایش فقط یک خط، به شکل\n"
+        "slug | نقد کامل در یک پاراگراف مفصل (حدود ۵ تا ۷ جمله) به فارسی، "
         "شامل نقاط قوت با ذکر جزئیات (بازی‌ها، کارگردانی، متن، طراحی صحنه و موسیقی)، نقاط ضعف مشخص و جمع‌بندی نظر تماشاگران و منتقدان\n"
-        "خلاصه و نقد کامل هر دو به فارسی باشند و داخل هیچ‌کدام از علامت | استفاده نکن.\n"
+        "داخل نقد از علامت | استفاده نکن.\n"
         "از همان slug انگلیسی که داده شده استفاده کن و هیچ متن دیگری ننویس.\n\n"
         f"فهرست نمایش‌ها:\n{listing}"
     )
@@ -570,19 +551,17 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str,
         return {}
 
     valid_slugs = {s["slug"] for s in shows}
-    results: Dict[str, Dict[str, str]] = {}
+    results: Dict[str, str] = {}
     for line in text.splitlines():
         if "|" not in line:
             continue
-        slug, _, rest = line.partition("|")
+        slug, _, remark = line.partition("|")
         slug = slug.strip().lstrip("-*•").strip()
-        brief, _, detail = rest.partition("|")
-        brief = " ".join(brief.split())    # collapse whitespace/newlines
-        detail = " ".join(detail.split())
+        remark = " ".join(remark.split())  # collapse whitespace/newlines
         # "no feedback found" is a miss, not an answer — don't bank it for 14
         # days; leave the show absent so the next run retries.
-        if slug in valid_slugs and brief and NO_FEEDBACK_MARKER not in brief:
-            results[slug] = {"brief": brief, "detail": detail or brief}
+        if slug in valid_slugs and remark and NO_FEEDBACK_MARKER not in remark:
+            results[slug] = remark
     missed = valid_slugs - set(results)
     if missed:
         print(f"Batch opinion research got no answer for: {', '.join(sorted(missed))}")
@@ -590,73 +569,9 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str,
 
 
 # ==========================================
-# REPORT GENERATION & NOTIFICATION
+# NOTIFICATION
 # ==========================================
 
-def _wrap_rtl_line(text: str, font_name: str, font_size: float, max_width: float) -> List[str]:
-    """Splits a logical-order Persian line into chunks that each fit in
-    max_width. ReportLab can't wrap bidi text correctly (it either reverses
-    the line order or the letters), so we pre-wrap here and bidi-convert each
-    chunk separately."""
-    words = text.split()
-    lines, current = [], ""
-    for w in words:
-        candidate = f"{current} {w}" if current else w
-        width = pdfmetrics.stringWidth(arabic_reshaper.reshape(candidate), font_name, font_size)
-        if width <= max_width or not current:
-            current = candidate
-        else:
-            lines.append(current)
-            current = w
-    if current:
-        lines.append(current)
-    return lines
-
-def create_persian_pdf(content: str, filename: str, font_path: str = "Vazirmatn-Regular.ttf"):
-    """Generates a PDF report supporting Persian/Arabic text."""
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    font_full_path = os.path.join(base_dir, font_path)
-
-    if not os.path.exists(font_full_path):
-        # Fallback if specific font missing, though user provided it
-        print(f"Warning: Font {font_path} not found.")
-        return
-
-    pdfmetrics.registerFont(TTFont("Vazir", font_full_path))
-    
-    doc = SimpleDocTemplate(
-        filename, pagesize=A3,
-        rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40
-    )
-
-    styles = getSampleStyleSheet()
-    
-    style_fa = ParagraphStyle("Persian", parent=styles["Normal"], fontName="Vazir", fontSize=14, leading=20, alignment=TA_RIGHT)
-    style_en = ParagraphStyle("English", parent=styles["Normal"], fontName="Vazir", fontSize=12, alignment=TA_LEFT)
-    style_map = ParagraphStyle("Map", parent=styles["Normal"], fontName="Courier", fontSize=10, leading=10, backColor=colors.whitesmoke)
-
-    story = []
-    
-    for line in content.splitlines():
-        if not line.strip():
-            story.append(Spacer(1, 10))
-            continue
-
-        if has_persian_chars(line):
-            # Pre-wrap in logical order, then bidi-convert each fitted line;
-            # letting ReportLab wrap the converted text scrambles the reading
-            # order of long paragraphs.
-            for chunk in _wrap_rtl_line(line, "Vazir", style_fa.fontSize, doc.width * 0.98):
-                reshaped = get_display(arabic_reshaper.reshape(chunk))
-                story.append(Paragraph(reshaped, style_fa))
-        elif "Stage" in line or "Row" in line:
-            story.append(Paragraph(line.replace(" ", "&nbsp;"), style_map))
-        else:
-            story.append(Paragraph(line, style_en))
-
-    doc.build(story)
-
-TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_TEXT_LIMIT = 4096
 
 def _split_message(text: str, limit: int) -> List[str]:
@@ -675,20 +590,11 @@ def _split_message(text: str, limit: int) -> List[str]:
         chunks.append(current)
     return chunks
 
-def send_telegram_message(chat_id: str, text: str = None, file_path: str = None):
-    """Sends a text message or a document to Telegram."""
-    if file_path:
-        url = f"{API_URL}/sendDocument"
-        # Telegram rejects captions over 1024 chars with a 400
-        caption = text[:TELEGRAM_CAPTION_LIMIT] if text else None
-        with open(file_path, "rb") as f:
-            data = {"chat_id": chat_id, "caption": caption}
-            files = {"document": f}
-            requests.post(url, data=data, files=files).raise_for_status()
-    elif text:
-        url = f"{API_URL}/sendMessage"
-        for chunk in _split_message(text, TELEGRAM_TEXT_LIMIT):
-            requests.post(url, json={"chat_id": chat_id, "text": chunk}).raise_for_status()
+def send_telegram_message(chat_id: str, text: str):
+    """Sends a text message to Telegram, splitting it if over the limit."""
+    url = f"{API_URL}/sendMessage"
+    for chunk in _split_message(text, TELEGRAM_TEXT_LIMIT):
+        requests.post(url, json={"chat_id": chat_id, "text": chunk}).raise_for_status()
 
 
 # ==========================================
@@ -696,14 +602,13 @@ def send_telegram_message(chat_id: str, text: str = None, file_path: str = None)
 # ==========================================
 
 def perform_hourly_job():
-    """Main job that runs scraping, PDF generation, and alerting."""
+    """Main job that runs scraping, summary notification, and alerting."""
     print(f"[{datetime.now()}] Starting hourly job...")
     scraper = TiwallScraper()
 
-    # --- Task 1: Top Shows Report ---
+    # --- Task 1: Top Shows Summary ---
     print("Fetching top shows...")
     top_shows = scraper.fetch_top_shows(limit=10)
-    report_lines = ["Top Tiwall Shows Report", "=" * 30, ""]
     summary_lines = ["🎭 **Top Shows with Front Row Availability:**", ""]
 
     summary_shows = []  # shows that will appear in the Telegram summary
@@ -714,21 +619,12 @@ def perform_hourly_job():
         try:
             details = scraper.scrape_show_details(show["sale_url"])
         except Exception as e:
-            report_lines.append(f"Error scraping {show['title']}: {e}")
+            print(f"Error scraping {show['title']}: {e}")
             continue
-
-        # Add to PDF Report
-        report_lines.append(f"🎭: {details['title']}")
-        report_lines.append(f"⭐: {show['score']:.2f} | Rating: {show['rating']} | Votes: {show['votes']}")
-        report_lines.append(f"🌐: {show['sale_url']}")
-        # Placeholder — swapped for the detailed remark once research has run.
-        report_lines.append(f"@@REMARK@@{details['slug']}")
 
         available_sessions = [s for s in details["sessions"] if s["has_front_row_free"]]
 
-        if not available_sessions:
-            report_lines.append("No front row seats available.")
-        else:
+        if available_sessions:
             summary_shows.append({
                 "slug": details["slug"],
                 "title": details["title"],
@@ -739,13 +635,6 @@ def perform_hourly_job():
                 "url": show["sale_url"],
             })
 
-            for sess in available_sessions:
-                report_lines.append(f"  📅 {sess['date_text']} ({sess['status_text']})")
-                if sess['seat_text_map']:
-                    report_lines.append("\n" + sess['seat_text_map'] + "\n")
-
-        report_lines.append("-" * 30)
-
     # --- Opinion research: one batched Gemini call for shows without fresh info ---
     show_info = load_show_info()
     today = datetime.now(TEHRAN_TZ).date()
@@ -753,9 +642,6 @@ def perform_hourly_job():
         s for s in summary_shows
         if s["slug"] not in show_info
         or (today - show_info[s["slug"]]["date"]).days > INFO_MAX_AGE_DAYS
-        # Entries banked before the brief/detail split lack a detailed
-        # critique — re-research them so the PDF gets one too.
-        or not show_info[s["slug"]].get("detail")
     ]
     if missing:
         if GEMINI_API_KEY:
@@ -767,7 +653,7 @@ def perform_hourly_job():
             print(f"Researching {len(missing)} shows in one batch: {', '.join(s['slug'] for s in missing)}")
             new_remarks = get_shows_info_batch(gemini_client, missing)
             for slug, remark in new_remarks.items():
-                show_info[slug] = {"date": today, **remark}
+                show_info[slug] = {"date": today, "remark": remark}
             if new_remarks:
                 save_show_info(show_info)
         else:
@@ -778,33 +664,16 @@ def perform_hourly_job():
         summary_lines.append(f"🎭 {s['title']}")
         summary_lines.append(f"   ⭐: {s['score']:.2f} | 🗓️: {s['session_count']}")
         if entry := show_info.get(s["slug"]):
-            summary_lines.append(f"   💬 {entry['brief']}")
+            summary_lines.append(f"   💬 {entry['remark']}")
         summary_lines.append(f"   🌐: {s['url']}\n")
 
-    # Fill the PDF remark placeholders with the detailed critique (falls back
-    # to the brief for old bank entries; dropped when no info exists).
-    final_report_lines = []
-    for line in report_lines:
-        if line.startswith("@@REMARK@@"):
-            entry = show_info.get(line[len("@@REMARK@@"):])
-            if entry:
-                final_report_lines.append(f"💬 {entry.get('detail') or entry['brief']}")
-        else:
-            final_report_lines.append(line)
-
-    # Generate and Send PDF
-    pdf_filename = "tiwall_report.pdf"
-    create_persian_pdf("\n".join(final_report_lines), pdf_filename)
-    
     summary_text = "\n".join(summary_lines)
     if len(summary_lines) <= 2:
         summary_text = "No top shows have front row seats available right now."
 
-    print("Sending summary and PDF report...")
-    # Summary goes as a text message (4096 limit, auto-split); the caption
-    # limit on documents is only 1024 chars, which remarks easily exceed.
+    print("Sending summary...")
+    # Sent as a text message (4096 limit, auto-split across messages)
     send_telegram_message(CHAT_ID_REPORT, text=summary_text)
-    send_telegram_message(CHAT_ID_REPORT, text="📄 Full seat map report", file_path=pdf_filename)
 
 
     # --- Task 2: Favorite Shows Alert ---

@@ -1,7 +1,4 @@
 requests
 beautifulsoup4
-reportlab
-arabic-reshaper
-python-bidi
 google-genai
 tzdata
