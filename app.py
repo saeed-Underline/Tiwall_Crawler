@@ -474,8 +474,10 @@ class TiwallScraper:
 def load_show_info() -> Dict[str, Dict]:
     """Loads the persistent show-feedback bank.
 
-    Line format: "slug | YYYY-MM-DD | remark". Hand-added lines may omit the
-    date ("slug | remark") and are treated as researched today.
+    Line format: "slug | YYYY-MM-DD | brief | detail". Older lines with a
+    single remark ("slug | date | remark") keep it as the brief with no
+    detail. Hand-added lines may omit the date ("slug | brief [| detail]")
+    and are treated as researched today.
     """
     info: Dict[str, Dict] = {}
     if not os.path.exists(INFORMATION_FILE):
@@ -485,41 +487,47 @@ def load_show_info() -> Dict[str, Dict]:
             line = line.strip()
             if not line or line.startswith("#"):
                 continue
-            parts = [p.strip() for p in line.split("|", 2)]
+            parts = [p.strip() for p in line.split("|", 3)]
             if len(parts) < 2:
                 continue
             slug = parts[0]
             date = None
-            if len(parts) == 3:
+            if len(parts) >= 3:
                 try:
                     date = datetime.strptime(parts[1], "%Y-%m-%d").date()
                 except ValueError:
                     pass
             if date is not None:
-                remark = parts[2]
+                brief = parts[2]
+                detail = parts[3] if len(parts) == 4 else ""
             else:
-                remark = " | ".join(p for p in parts[1:] if p)
                 date = datetime.now(TEHRAN_TZ).date()
+                brief = parts[1]
+                detail = parts[2] if len(parts) >= 3 else ""
             # Legacy "no feedback found" lines are misses, not answers — drop
             # them so the show gets re-researched.
-            if slug and remark and NO_FEEDBACK_MARKER not in remark:
-                info[slug] = {"date": date, "remark": remark}
+            if slug and brief and NO_FEEDBACK_MARKER not in brief:
+                info[slug] = {"date": date, "brief": brief, "detail": detail}
     return info
 
 def save_show_info(info: Dict[str, Dict]):
-    lines = ["# Show feedback bank — format: slug | researched date | remark", ""]
+    lines = ["# Show feedback bank — format: slug | researched date | brief | detail", ""]
     for slug in sorted(info):
         entry = info[slug]
-        lines.append(f"{slug} | {entry['date'].strftime('%Y-%m-%d')} | {entry['remark']}")
+        lines.append(
+            f"{slug} | {entry['date'].strftime('%Y-%m-%d')} | {entry['brief']} | {entry.get('detail', '')}"
+        )
     with open(INFORMATION_FILE, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
 
 NO_FEEDBACK_MARKER = "یافت نشد"  # Gemini's "no reliable feedback" fallback
 
-def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str, str]:
-    """Asks Gemini (one request, with Google Search grounding) for brief critical
-    Persian remarks on the public reception of several shows. Each show dict has
-    slug/title/rating/votes. Returns {slug: remark}."""
+def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str, Dict[str, str]]:
+    """Asks Gemini (one request, with Google Search grounding) for critical
+    Persian remarks on the public reception of several shows: a one-sentence
+    brief (for the Telegram summary) and a fuller critique (for the PDF).
+    Each show dict has slug/title/rating/votes.
+    Returns {slug: {"brief": ..., "detail": ...}}."""
     listing_lines = []
     for s in shows:
         line = f"{s['slug']} | {s['title']}"
@@ -538,8 +546,9 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str,
         "اگر بازخوردها متفاوت یا متوسط است، صادقانه بنویس نظرها دوپهلوست و ضعف اصلی را نام ببر.\n"
         "- از صفت‌های تبلیغاتی و کلی مثل «عالی» و «بی‌نظیر» بدون استناد به نظر واقعی خودداری کن.\n"
         "- فقط اگر هیچ نظر کیفی پیدا نکردی و امتیازی هم داده نشده، بنویس: بازخورد قابل اعتمادی یافت نشد.\n"
-        "پاسخ را دقیقاً در همین قالب بده: برای هر نمایش فقط یک خط، به شکل\n"
-        "slug | یک تا دو جمله کوتاه به فارسی درباره بازخورد و کیفیت واقعی نمایش\n"
+        "پاسخ را دقیقاً در همین قالب بده: برای هر نمایش فقط یک خط با دو بخش جداشده با |، به شکل\n"
+        "slug | یک جمله بسیار کوتاه (حداکثر ۱۵ کلمه) درباره کیفیت نمایش | نقد مفصل‌تر در ۳ تا ۵ جمله شامل نقاط قوت، نقاط ضعف و جمع‌بندی بازخوردها\n"
+        "خلاصه کوتاه و نقد مفصل هر دو به فارسی باشند و داخل هیچ‌کدام از علامت | استفاده نکن.\n"
         "از همان slug انگلیسی که داده شده استفاده کن و هیچ متن دیگری ننویس.\n\n"
         f"فهرست نمایش‌ها:\n{listing}"
     )
@@ -560,17 +569,19 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str,
         return {}
 
     valid_slugs = {s["slug"] for s in shows}
-    results: Dict[str, str] = {}
+    results: Dict[str, Dict[str, str]] = {}
     for line in text.splitlines():
         if "|" not in line:
             continue
-        slug, _, remark = line.partition("|")
+        slug, _, rest = line.partition("|")
         slug = slug.strip().lstrip("-*•").strip()
-        remark = " ".join(remark.split())  # collapse whitespace/newlines
+        brief, _, detail = rest.partition("|")
+        brief = " ".join(brief.split())    # collapse whitespace/newlines
+        detail = " ".join(detail.split())
         # "no feedback found" is a miss, not an answer — don't bank it for 14
         # days; leave the show absent so the next run retries.
-        if slug in valid_slugs and remark and NO_FEEDBACK_MARKER not in remark:
-            results[slug] = remark
+        if slug in valid_slugs and brief and NO_FEEDBACK_MARKER not in brief:
+            results[slug] = {"brief": brief, "detail": detail or brief}
     missed = valid_slugs - set(results)
     if missed:
         print(f"Batch opinion research got no answer for: {', '.join(sorted(missed))}")
@@ -686,6 +697,8 @@ def perform_hourly_job():
         report_lines.append(f"🎭: {details['title']}")
         report_lines.append(f"⭐: {show['score']:.2f} | Rating: {show['rating']} | Votes: {show['votes']}")
         report_lines.append(f"🌐: {show['sale_url']}")
+        # Placeholder — swapped for the detailed remark once research has run.
+        report_lines.append(f"@@REMARK@@{details['slug']}")
 
         available_sessions = [s for s in details["sessions"] if s["has_front_row_free"]]
 
@@ -716,6 +729,9 @@ def perform_hourly_job():
         s for s in summary_shows
         if s["slug"] not in show_info
         or (today - show_info[s["slug"]]["date"]).days > INFO_MAX_AGE_DAYS
+        # Entries banked before the brief/detail split lack a detailed
+        # critique — re-research them so the PDF gets one too.
+        or not show_info[s["slug"]].get("detail")
     ]
     if missing:
         if GEMINI_API_KEY:
@@ -727,7 +743,7 @@ def perform_hourly_job():
             print(f"Researching {len(missing)} shows in one batch: {', '.join(s['slug'] for s in missing)}")
             new_remarks = get_shows_info_batch(gemini_client, missing)
             for slug, remark in new_remarks.items():
-                show_info[slug] = {"date": today, "remark": remark}
+                show_info[slug] = {"date": today, **remark}
             if new_remarks:
                 save_show_info(show_info)
         else:
@@ -738,12 +754,23 @@ def perform_hourly_job():
         summary_lines.append(f"🎭 {s['title']}")
         summary_lines.append(f"   ⭐: {s['score']:.2f} | 🗓️: {s['session_count']}")
         if entry := show_info.get(s["slug"]):
-            summary_lines.append(f"   💬 {entry['remark']}")
+            summary_lines.append(f"   💬 {entry['brief']}")
         summary_lines.append(f"   🌐: {s['url']}\n")
+
+    # Fill the PDF remark placeholders with the detailed critique (falls back
+    # to the brief for old bank entries; dropped when no info exists).
+    final_report_lines = []
+    for line in report_lines:
+        if line.startswith("@@REMARK@@"):
+            entry = show_info.get(line[len("@@REMARK@@"):])
+            if entry:
+                final_report_lines.append(f"💬 {entry.get('detail') or entry['brief']}")
+        else:
+            final_report_lines.append(line)
 
     # Generate and Send PDF
     pdf_filename = "tiwall_report.pdf"
-    create_persian_pdf("\n".join(report_lines), pdf_filename)
+    create_persian_pdf("\n".join(final_report_lines), pdf_filename)
     
     summary_text = "\n".join(summary_lines)
     if len(summary_lines) <= 2:
