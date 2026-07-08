@@ -547,8 +547,9 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str,
         "- از صفت‌های تبلیغاتی و کلی مثل «عالی» و «بی‌نظیر» بدون استناد به نظر واقعی خودداری کن.\n"
         "- فقط اگر هیچ نظر کیفی پیدا نکردی و امتیازی هم داده نشده، بنویس: بازخورد قابل اعتمادی یافت نشد.\n"
         "پاسخ را دقیقاً در همین قالب بده: برای هر نمایش فقط یک خط با دو بخش جداشده با |، به شکل\n"
-        "slug | یک جمله بسیار کوتاه (حداکثر ۱۵ کلمه) درباره کیفیت نمایش | نقد مفصل‌تر در ۳ تا ۵ جمله شامل نقاط قوت، نقاط ضعف و جمع‌بندی بازخوردها\n"
-        "خلاصه کوتاه و نقد مفصل هر دو به فارسی باشند و داخل هیچ‌کدام از علامت | استفاده نکن.\n"
+        "slug | خلاصه‌ای در ۳ تا ۴ جمله درباره کیفیت نمایش و بازخوردها | نقد کامل در یک پاراگراف مفصل (حدود ۶ تا ۸ جمله) "
+        "شامل نقاط قوت با ذکر جزئیات (بازی‌ها، کارگردانی، متن، طراحی صحنه و موسیقی)، نقاط ضعف مشخص و جمع‌بندی نظر تماشاگران و منتقدان\n"
+        "خلاصه و نقد کامل هر دو به فارسی باشند و داخل هیچ‌کدام از علامت | استفاده نکن.\n"
         "از همان slug انگلیسی که داده شده استفاده کن و هیچ متن دیگری ننویس.\n\n"
         f"فهرست نمایش‌ها:\n{listing}"
     )
@@ -592,6 +593,25 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str,
 # REPORT GENERATION & NOTIFICATION
 # ==========================================
 
+def _wrap_rtl_line(text: str, font_name: str, font_size: float, max_width: float) -> List[str]:
+    """Splits a logical-order Persian line into chunks that each fit in
+    max_width. ReportLab can't wrap bidi text correctly (it either reverses
+    the line order or the letters), so we pre-wrap here and bidi-convert each
+    chunk separately."""
+    words = text.split()
+    lines, current = [], ""
+    for w in words:
+        candidate = f"{current} {w}" if current else w
+        width = pdfmetrics.stringWidth(arabic_reshaper.reshape(candidate), font_name, font_size)
+        if width <= max_width or not current:
+            current = candidate
+        else:
+            lines.append(current)
+            current = w
+    if current:
+        lines.append(current)
+    return lines
+
 def create_persian_pdf(content: str, filename: str, font_path: str = "Vazirmatn-Regular.ttf"):
     """Generates a PDF report supporting Persian/Arabic text."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -623,8 +643,12 @@ def create_persian_pdf(content: str, filename: str, font_path: str = "Vazirmatn-
             continue
 
         if has_persian_chars(line):
-            reshaped = get_display(arabic_reshaper.reshape(line))
-            story.append(Paragraph(reshaped, style_fa))
+            # Pre-wrap in logical order, then bidi-convert each fitted line;
+            # letting ReportLab wrap the converted text scrambles the reading
+            # order of long paragraphs.
+            for chunk in _wrap_rtl_line(line, "Vazir", style_fa.fontSize, doc.width * 0.98):
+                reshaped = get_display(arabic_reshaper.reshape(chunk))
+                story.append(Paragraph(reshaped, style_fa))
         elif "Stage" in line or "Row" in line:
             story.append(Paragraph(line.replace(" ", "&nbsp;"), style_map))
         else:
