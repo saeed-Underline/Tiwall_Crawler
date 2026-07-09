@@ -30,7 +30,7 @@ API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # Optional: enables Gemini-researched public-opinion remarks in the channel
 # summary. When unset, the job runs normally without remarks.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = "gemini-3.5-flash"
 INFORMATION_FILE = "information.txt"   # persistent show-feedback bank, committed to the repo
 INFO_MAX_AGE_DAYS = 14                 # re-research a show after this many days
 TEHRAN_TZ = ZoneInfo("Asia/Tehran")
