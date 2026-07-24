@@ -40,7 +40,7 @@ TEHRAN_TZ = ZoneInfo("Asia/Tehran")
 
 # Tiwall URLs
 BASE_URL = "https://www.tiwall.com"
-SHOWCASE_URL = "https://www.tiwall.com/showcase?filters=city:2111,s:theater,available:true&order=rating"
+SHOWCASE_URL = "https://www.tiwall.com/showcase?filters=city:2111,s:theater,available:true&order=sale"
 SEATMAP_API_URL = "https://www.tiwall.com/api/v1/internal/general/seatmapState"
 VARIATIONS_API_URL = "https://www.tiwall.com/api/v1/projects/{}/variations"
 
