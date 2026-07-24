@@ -97,6 +97,17 @@ def is_element_hidden(tag) -> bool:
 # SCRAPING LOGIC
 # ==========================================
 
+def compute_trust(stats: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Turns wall stats into a 0..1 trust factor. None = not enough data to
+    judge (quiet wall or fetch failure); new shows are not punished for that."""
+    if not stats or stats["posts"] < 5:
+        return None
+    buyer_share = stats["buyer_posts"] / stats["posts"]
+    rank_score = ((stats["avg_rank"] or 1) - 1) / 6
+    review_presence = min(stats["reviews"] / 5, 1.0)
+    return 0.4 * buyer_share + 0.4 * rank_score + 0.2 * review_presence
+
+
 class TiwallScraper:
     def __init__(self):
         self.session = requests.Session()
@@ -147,7 +158,53 @@ class TiwallScraper:
 
         # Sort by score descending
         shows.sort(key=lambda x: x["score"], reverse=True)
-        return shows[:limit]
+
+        # Bought votes inflate rating/votes but not the wall: adjust the top
+        # candidates' scores by a trust factor from wall authenticity signals.
+        candidates = shows[:limit + 5]
+        for s in candidates:
+            stats = self.fetch_wall_stats(s["page_url"]) if s["page_url"] else None
+            s["wall_stats"] = stats
+            s["trust"] = compute_trust(stats)
+            effective_trust = s["trust"] if s["trust"] is not None else 0.5
+            s["score"] *= 0.7 + 0.3 * effective_trust
+
+        candidates.sort(key=lambda x: x["score"], reverse=True)
+        return candidates[:limit]
+
+    def fetch_wall_stats(self, page_url: str) -> Optional[Dict[str, Any]]:
+        """Fetches the show's wall (user posts) and extracts authenticity
+        signals that are hard to fake with bought votes: verified-buyer posts,
+        author credibility ranks (1-7), and substantive reviews/critiques."""
+        resp = self.safe_request("GET", f"{page_url}?part=wall")
+        if not resp:
+            return None
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        posts = soup.select("div.wall-post")
+
+        buyer_posts = reviews = 0
+        ranks = []
+        for post in posts:
+            if "by-customer" in (post.get("class") or []):
+                buyer_posts += 1
+            if post.select_one(".wallpost-tags a.tag-review, .wallpost-tags a.tag-critique"):
+                reviews += 1
+            # The author's badge is inside .writer; nested comments carry
+            # their own badges, so don't search the whole post.
+            writer = post.select_one("div.writer")
+            badge = writer.select_one(".rank-badge-icon[data-rank]") if writer else None
+            if badge:
+                rank = persian_to_int(badge.get("data-rank", ""))
+                if rank:
+                    ranks.append(rank)
+
+        return {
+            "posts": len(posts),
+            "buyer_posts": buyer_posts,
+            "reviews": reviews,
+            "avg_rank": (sum(ranks) / len(ranks)) if ranks else None,
+        }
 
     def _parse_showcase_card(self, card) -> Dict[str, Any]:
         """Extracts metadata from a single show card in the showcase list."""
@@ -668,6 +725,7 @@ def perform_hourly_job():
                 "votes": show["votes"],
                 "session_count": len(available_sessions),
                 "url": show["sale_url"],
+                "trust": show.get("trust"),
             })
 
     # --- Opinion research: one batched Gemini call for shows without fresh info ---
@@ -702,8 +760,9 @@ def perform_hourly_job():
 
     # Build the Telegram summary (stale entries keep showing until re-researched)
     for s in summary_shows:
+        trust_text = f"{s['trust']:.0%}" if s.get("trust") is not None else "—"
         block_lines = [f"🎭 {s['title']}",
-                       f"   ⭐: {s['score']:.2f} | 🗓️: {s['session_count']}"]
+                       f"   ⭐: {s['score']:.2f} | 🗓️: {s['session_count']} | 🛡️: {trust_text}"]
         if entry := show_info.get(s["slug"]):
             block_lines.append(f"   💬 {entry['remark']}")
         block_lines.append(f"   🌐: {s['url']}")
