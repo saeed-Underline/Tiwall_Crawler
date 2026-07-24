@@ -564,9 +564,13 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str,
         # or list bullets) — strip those from both ends before matching.
         slug = slug.strip().strip("-*•`_ \t")
         remark = " ".join(remark.replace("*", "").split())  # collapse md/whitespace
+        # A remark containing another show's "slug |" means the model ran
+        # several answers together on one line — banking it would store many
+        # reviews under one show (seen Jul 2026). Treat it as a miss.
+        run_on = any(f"{other} |" in remark for other in valid_slugs if other != slug)
         # "no feedback found" is a miss, not an answer — don't bank it for 14
         # days; leave the show absent so the next run retries.
-        if slug in valid_slugs and remark and NO_FEEDBACK_MARKER not in remark:
+        if slug in valid_slugs and remark and not run_on and NO_FEEDBACK_MARKER not in remark:
             results[slug] = remark
     missed = valid_slugs - set(results)
     if missed:
