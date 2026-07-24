@@ -559,8 +559,10 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str,
         if "|" not in line:
             continue
         slug, _, remark = line.partition("|")
-        slug = slug.strip().lstrip("-*•").strip()
-        remark = " ".join(remark.split())  # collapse whitespace/newlines
+        # Grounded responses often decorate lines with markdown (e.g. "**slug**"
+        # or list bullets) — strip those from both ends before matching.
+        slug = slug.strip().strip("-*•`_ \t")
+        remark = " ".join(remark.replace("*", "").split())  # collapse md/whitespace
         # "no feedback found" is a miss, not an answer — don't bank it for 14
         # days; leave the show absent so the next run retries.
         if slug in valid_slugs and remark and NO_FEEDBACK_MARKER not in remark:
@@ -568,6 +570,8 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str,
     missed = valid_slugs - set(results)
     if missed:
         print(f"Batch opinion research got no answer for: {', '.join(sorted(missed))}")
+        # Log the raw reply so format drift is visible in the Actions log.
+        print(f"--- raw Gemini reply ({len(text)} chars) ---\n{text[:2000]}\n---")
     return results
 
 
@@ -676,11 +680,17 @@ def perform_hourly_job():
                 api_key=GEMINI_API_KEY,
                 http_options=genai_types.HttpOptions(timeout=240_000),
             )
-            print(f"Researching {len(missing)} shows in one batch: {', '.join(s['slug'] for s in missing)}")
-            new_remarks = get_shows_info_batch(gemini_client, missing)
-            for slug, remark in new_remarks.items():
-                show_info[slug] = {"date": today, "remark": remark}
-            if new_remarks:
+            # Small batches: one call asked to write 18 detailed paragraphs
+            # gets truncated/mangled and most lines fail to parse.
+            got_any = False
+            for i in range(0, len(missing), 6):
+                chunk = missing[i:i + 6]
+                print(f"Researching {len(chunk)} shows: {', '.join(s['slug'] for s in chunk)}")
+                new_remarks = get_shows_info_batch(gemini_client, chunk)
+                for slug, remark in new_remarks.items():
+                    show_info[slug] = {"date": today, "remark": remark}
+                got_any = got_any or bool(new_remarks)
+            if got_any:
                 save_show_info(show_info)
         else:
             print("GEMINI_API_KEY not set; skipping show opinion research.")
