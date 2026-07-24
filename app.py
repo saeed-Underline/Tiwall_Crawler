@@ -30,9 +30,9 @@ API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 # Optional: enables Gemini-researched public-opinion remarks in the channel
 # summary. When unset, the job runs normally without remarks.
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-# Diagnosed Jul 2026 (see gemini-diagnose.yml): on this free-tier key, Search
-# grounding 429s on every Gemini 3.x model; 2.5-flash is the only model that
-# still grounds successfully (grandfathered for existing users).
+# Diagnosed Jul 2026: on this free-tier key, Search grounding 429s on every
+# Gemini 3.x model; 2.5-flash is the only model that still grounds
+# successfully (grandfathered for existing users).
 GEMINI_MODEL = "gemini-2.5-flash"
 INFORMATION_FILE = "information.txt"   # persistent show-feedback bank, committed to the repo
 INFO_MAX_AGE_DAYS = 14                 # re-research a show after this many days
