@@ -642,7 +642,7 @@ def perform_hourly_job():
 
     # --- Task 1: Top Shows Summary ---
     print("Fetching top shows...")
-    top_shows = scraper.fetch_top_shows(limit=30)
+    top_shows = scraper.fetch_top_shows(limit=10)
     # One block per show; blocks are never split across Telegram messages.
     summary_blocks = ["🎭 **Top Shows with Front Row Availability:**"]
 
