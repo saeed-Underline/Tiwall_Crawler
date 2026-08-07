@@ -237,6 +237,11 @@ class TiwallScraper:
         sale_url = urljoin(BASE_URL, sale_urn) if sale_urn else None
         slug = sale_urn.rstrip("/").split("/")[-1] if sale_urn else None
 
+        img = card.select_one("img.page-image")
+        image_url = (img.get("src") or img.get("data-src")) if img else None
+        if image_url:
+            image_url = urljoin(BASE_URL, image_url)
+
         return {
             "title": title,
             "rating": rating,
@@ -244,6 +249,7 @@ class TiwallScraper:
             "page_url": page_url,
             "sale_url": sale_url,
             "slug": slug,
+            "image_url": image_url,
             "score": 0.0
         }
 
@@ -642,6 +648,7 @@ def get_shows_info_batch(client: "genai.Client", shows: List[Dict]) -> Dict[str,
 # ==========================================
 
 TELEGRAM_TEXT_LIMIT = 4096
+TELEGRAM_CAPTION_LIMIT = 1024
 
 def _split_message(text: str, limit: int) -> List[str]:
     """Splits text into chunks under the limit, breaking at line boundaries."""
@@ -659,33 +666,26 @@ def _split_message(text: str, limit: int) -> List[str]:
         chunks.append(current)
     return chunks
 
-def _pack_blocks(blocks: List[str], limit: int) -> List[str]:
-    """Packs blocks into chunks under the limit without ever splitting a
-    block: a block that doesn't fit starts the next chunk. Only a single
-    block longer than the limit itself falls back to line splitting."""
-    chunks, current = [], ""
-    for block in blocks:
-        candidate = f"{current}\n\n{block}" if current else block
-        if len(candidate) <= limit:
-            current = candidate
-            continue
-        if current:
-            chunks.append(current)
-        if len(block) <= limit:
-            current = block
-        else:
-            parts = _split_message(block, limit)
-            chunks.extend(parts[:-1])
-            current = parts[-1]
-    if current:
-        chunks.append(current)
-    return chunks
-
 def send_telegram_message(chat_id: str, text: str):
     """Sends a text message to Telegram, splitting it if over the limit."""
     url = f"{API_URL}/sendMessage"
     for chunk in _split_message(text, TELEGRAM_TEXT_LIMIT):
         requests.post(url, json={"chat_id": chat_id, "text": chunk}).raise_for_status()
+
+def send_telegram_photo(chat_id: str, photo_url: str, text: str):
+    """Sends a photo with the text as caption. Captions are limited to 1024
+    chars, so any overflow goes out as a follow-up text message. Falls back to
+    a plain text message if Telegram rejects the photo (e.g. dead image URL)."""
+    chunks = _split_message(text, TELEGRAM_CAPTION_LIMIT)
+    resp = requests.post(f"{API_URL}/sendPhoto", json={
+        "chat_id": chat_id, "photo": photo_url, "caption": chunks[0],
+    })
+    if not resp.ok:
+        print(f"sendPhoto failed for {photo_url}: {resp.text[:200]}")
+        send_telegram_message(chat_id, text)
+        return
+    for chunk in chunks[1:]:
+        send_telegram_message(chat_id, chunk)
 
 
 # ==========================================
@@ -700,8 +700,7 @@ def perform_hourly_job():
     # --- Task 1: Top Shows Summary ---
     print("Fetching top shows...")
     top_shows = scraper.fetch_top_shows(limit=10)
-    # One block per show; blocks are never split across Telegram messages.
-    summary_blocks = ["🎭 **Top Shows with Front Row Availability:**"]
+    summary_header = "🎭 **Top Shows with Front Row Availability:**"
 
     summary_shows = []  # shows that will appear in the Telegram summary
 
@@ -726,6 +725,7 @@ def perform_hourly_job():
                 "session_count": len(available_sessions),
                 "url": show["sale_url"],
                 "trust": show.get("trust"),
+                "image_url": show.get("image_url"),
             })
 
     # --- Opinion research: one batched Gemini call for shows without fresh info ---
@@ -758,23 +758,25 @@ def perform_hourly_job():
         else:
             print("GEMINI_API_KEY not set; skipping show opinion research.")
 
-    # Build the Telegram summary (stale entries keep showing until re-researched)
-    for s in summary_shows:
-        trust_text = f"{s['trust']:.0%}" if s.get("trust") is not None else "—"
-        block_lines = [f"🎭 {s['title']}",
-                       f"   ⭐: {s['score']:.2f} | 🗓️: {s['session_count']} | 🛡️: {trust_text}"]
-        if entry := show_info.get(s["slug"]):
-            block_lines.append(f"   💬 {entry['remark']}")
-        block_lines.append(f"   🌐: {s['url']}")
-        summary_blocks.append("\n".join(block_lines))
-
+    # Build the Telegram summary (stale entries keep showing until re-researched):
+    # one message per show, with the show's poster attached when available.
     print("Sending summary...")
-    if len(summary_blocks) <= 1:
+    if not summary_shows:
         send_telegram_message(CHAT_ID_REPORT, "No top shows have front row seats available right now.")
     else:
-        # Whole show blocks per message; a block that doesn't fit moves to the next one
-        for chunk in _pack_blocks(summary_blocks, TELEGRAM_TEXT_LIMIT):
-            send_telegram_message(CHAT_ID_REPORT, chunk)
+        send_telegram_message(CHAT_ID_REPORT, summary_header)
+        for s in summary_shows:
+            trust_text = f"{s['trust']:.0%}" if s.get("trust") is not None else "—"
+            block_lines = [f"🎭 {s['title']}",
+                           f"   ⭐: {s['score']:.2f} | 🗓️: {s['session_count']} | 🛡️: {trust_text}"]
+            if entry := show_info.get(s["slug"]):
+                block_lines.append(f"   💬 {entry['remark']}")
+            block_lines.append(f"   🌐: {s['url']}")
+            block = "\n".join(block_lines)
+            if s.get("image_url"):
+                send_telegram_photo(CHAT_ID_REPORT, s["image_url"], block)
+            else:
+                send_telegram_message(CHAT_ID_REPORT, block)
 
 
     # --- Task 2: Favorite Shows Alert ---
