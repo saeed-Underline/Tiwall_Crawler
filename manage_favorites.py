@@ -72,6 +72,30 @@ def get_updates(offset=None):
     return payload.get("result", [])
 
 
+BOT_COMMANDS = [
+    {"command": "add", "description": "Add a show: /add <slug or tiwall link>"},
+    {"command": "remove", "description": "Remove a show: /remove <slug>"},
+    {"command": "exclude", "description": "Skip dates: /exclude <slug> <date>، <date>"},
+    {"command": "include", "description": "Re-allow dates: /include <slug> <date> (or all)"},
+    {"command": "list", "description": "Show favorites and their excluded dates"},
+    {"command": "help", "description": "Show all commands and usage"},
+]
+
+
+def register_commands():
+    """Sets the bot's '/' autocomplete menu. Idempotent; failure is non-fatal."""
+    try:
+        resp = requests.post(
+            f"{API_URL}/setMyCommands",
+            json={"commands": BOT_COMMANDS},
+            timeout=30,
+        )
+        if not resp.json().get("ok"):
+            print(f"setMyCommands failed: {resp.text}")
+    except requests.RequestException as e:
+        print(f"setMyCommands failed: {e}")
+
+
 def send_message(chat_id, text):
     if len(text) > 4096:
         text = text[:4095] + "…"
@@ -318,6 +342,8 @@ def main():
         raise SystemExit("BOT_TOKEN environment variable is not set.")
     if not ADMIN_CHAT_ID:
         raise SystemExit("ADMIN_CHAT_ID environment variable is not set.")
+
+    register_commands()
 
     updates = get_updates()
     if not updates:
