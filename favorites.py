@@ -20,7 +20,23 @@ FAVORITES_FILE = "favorite_shows.txt"
 PERSIAN_DIGITS_MAP = {
     "۰": "0", "۱": "1", "۲": "2", "۳": "3", "۴": "4",
     "۵": "5", "۶": "6", "۷": "7", "۸": "8", "۹": "9",
+    # Arabic-Indic digits: visually identical, used interchangeably on the web
+    "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
+    "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
 }
+
+# Arabic yeh/kaf look identical to the Persian letters and are typed
+# interchangeably; fold them so "شهريور" and "شهریور" compare equal.
+# ZWNJ is dropped for the same reason.
+LETTER_FOLD_MAP = {"ي": "ی", "ك": "ک", "‌": ""}
+
+TIME_RE = re.compile(r"\d{1,2}[:٫]\d{2}")
+# A day number (1–2 digits, never part of a longer number like a year)
+# optionally followed by its month name.
+DAY_MONTH_RE = re.compile(r"(?<!\d)(\d{1,2})(?!\d)\s*([^\s\d›>|،,]+)?")
+# Same shape over raw text, so a date keeps the digits the user typed.
+_D = r"\d۰-۹٠-٩"
+RAW_DAY_MONTH_RE = re.compile(rf"(?<![{_D}])([{_D}]{{1,2}})(?![{_D}])\s*([^\s{_D}›>|،,]+)?")
 
 
 def persian_to_english(text: str) -> str:
@@ -31,8 +47,40 @@ def persian_to_english(text: str) -> str:
 
 
 def normalize_date(text: str) -> str:
-    """Canonical form for comparing exclusion dates: ASCII digits, single spaces."""
-    return re.sub(r"\s+", " ", persian_to_english(text)).strip()
+    """Canonical form for comparing dates: ASCII digits, folded letters, single spaces."""
+    folded = "".join(LETTER_FOLD_MAP.get(ch, ch) for ch in persian_to_english(text))
+    return re.sub(r"\s+", " ", folded).strip()
+
+
+def split_date_list(text: str) -> list:
+    """Splits user-typed dates into individual date strings, digits as typed.
+
+    Accepts '|', ',' and '،' separators and also bare runs such as
+    "۵ شهریور ۶ شهریور ۷ شهریور", which are otherwise stored as one
+    unmatchable blob.
+    """
+    dates = []
+    for chunk in re.split(r"[|,،]", text):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        matches = RAW_DAY_MONTH_RE.findall(chunk)
+        if matches:
+            dates.extend(f"{day} {month}".strip() for day, month in matches)
+        else:
+            dates.append(chunk)
+    return dates
+
+
+def parse_day_month(text: str) -> list:
+    """Extracts (day:int, month or None) pairs from a date string.
+
+    Times are stripped first so "› 19:00" is not read as a day. Day numbers
+    are compared as integers, so the site's zero-padded "۰۴ شهریور" matches
+    a hand-typed "4 شهریور" while "13 شهریور" still differs from "3 شهریور".
+    """
+    cleaned = TIME_RE.sub(" ", normalize_date(text))
+    return [(int(m.group(1)), m.group(2) or None) for m in DAY_MONTH_RE.finditer(cleaned)]
 
 
 def load_entries(path: str = FAVORITES_FILE) -> list:
@@ -86,12 +134,16 @@ def load_favorites(path: str = FAVORITES_FILE) -> dict:
 def session_excluded(date_text: str, excluded_dates: list) -> bool:
     """True if the session's date matches one of the excluded dates.
 
-    Digit-boundary match so "3 شهریور" does not also exclude "13 شهریور"
-    or "23 شهریور"; digits normalized so Persian and ASCII forms compare equal.
+    Matches on (day number, month name), so "4 شهریور" excludes the site's
+    "چهارشنبه ۰۴ شهریور › ۱۹:۰۰" but "3 شهریور" never excludes "13 شهریور".
+    An exclusion written as a bare day ("4") matches that day in any month.
     """
-    normalized_text = normalize_date(date_text)
+    session_pairs = parse_day_month(date_text)
+    if not session_pairs:
+        return False
     for excluded in excluded_dates:
-        needle = normalize_date(excluded)
-        if needle and re.search(rf"(?<!\d){re.escape(needle)}(?!\d)", normalized_text):
-            return True
+        for ex_day, ex_month in parse_day_month(excluded):
+            for day, month in session_pairs:
+                if day == ex_day and (ex_month is None or month is None or ex_month == month):
+                    return True
     return False

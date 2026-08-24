@@ -32,6 +32,7 @@ from favorites import (
     load_entries,
     normalize_date,
     save_entries,
+    split_date_list,
 )
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN", "")
@@ -41,8 +42,6 @@ API_URL = f"https://api.telegram.org/bot{BOT_TOKEN}"
 BASE_URL = "https://www.tiwall.com"
 
 SLUG_RE = re.compile(r"^[A-Za-z0-9._-]+$")
-# Dates may be separated by '|', ',' or the Persian comma '،'
-DATE_SPLIT_RE = re.compile(r"[|,،]")
 
 USAGE = (
     "📖 Commands (one per line):\n"
@@ -142,7 +141,7 @@ def check_slug_on_tiwall(slug):
 
 
 def split_dates(text):
-    return [d.strip() for d in DATE_SPLIT_RE.split(text) if d.strip()]
+    return split_date_list(text)
 
 
 def cmd_add(entries, arg):
