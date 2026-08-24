@@ -12,6 +12,8 @@ from urllib.parse import urljoin, urlparse
 
 from bs4 import BeautifulSoup
 
+from favorites import load_favorites, session_excluded
+
 # ==========================================
 # CONFIGURATION & CONSTANTS
 # ==========================================
@@ -780,20 +782,13 @@ def perform_hourly_job():
 
 
     # --- Task 2: Favorite Shows Alert ---
-    # Reads a local file for slugs to monitor specifically
-    fav_file = "favorite_shows.txt"
-    if os.path.exists(fav_file):
+    # favorite_shows.txt is managed via Telegram commands (manage_favorites.py)
+    # or by hand; '#' lines are comments and are skipped.
+    favorites = load_favorites()
+    if favorites:
         print("Checking favorite shows...")
-        # Each line: "slug" or "slug | excluded date | excluded date ...".
-        # Sessions whose date contains an excluded date are not alerted on.
-        favorites = []
-        with open(fav_file, "r", encoding="utf-8") as f:
-            for line in f:
-                parts = [p.strip() for p in line.split("|") if p.strip()]
-                if parts:
-                    favorites.append((parts[0], parts[1:]))
 
-        for slug, excluded_dates in favorites:
+        for slug, excluded_dates in favorites.items():
             url = f"{BASE_URL}/s/{slug}"
             try:
                 try:
@@ -805,12 +800,7 @@ def perform_hourly_job():
                 good_sessions = [
                     s for s in data["sessions"]
                     if s.get("has_front_row_free")
-                    # Compare with digits normalized so exclusions work whether
-                    # typed as "19 تیر" or "۱۹ تیر".
-                    and not any(
-                        persian_to_english(x) in persian_to_english(s["date_text"])
-                        for x in excluded_dates
-                    )
+                    and not session_excluded(s["date_text"], excluded_dates)
                 ]
 
                 if good_sessions:

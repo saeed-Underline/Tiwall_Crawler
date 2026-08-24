@@ -1,0 +1,41 @@
+name: Favorites Bot
+
+on:
+  schedule:
+    # Real cadence is 10–25 min: GitHub's scheduler delays cron jobs.
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+# Shared group with Tiwall Watcher: serializes pushes to main and prevents
+# two bot runs from polling getUpdates concurrently (409 conflict).
+concurrency:
+  group: tiwall-git
+  cancel-in-progress: false
+
+jobs:
+  bot:
+    runs-on: ubuntu-latest
+
+    # manage_favorites.py commits favorite_shows.txt back to the repo
+    permissions:
+      contents: write
+
+    env:
+      BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+      ADMIN_CHAT_ID: ${{ secrets.ADMIN_CHAT_ID }}
+
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v5
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        # Not requirements.txt — this job runs every 10 minutes and only needs requests.
+        run: pip install requests
+
+      - name: Process Telegram commands
+        run: python manage_favorites.py

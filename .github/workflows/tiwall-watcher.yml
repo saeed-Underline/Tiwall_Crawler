@@ -7,6 +7,12 @@ on:
   # optional: allow manual run from GitHub UI
   workflow_dispatch:
 
+# Shared group with Favorites Bot: serializes pushes to main so the two
+# workflows don't race each other.
+concurrency:
+  group: tiwall-git
+  cancel-in-progress: false
+
 jobs:
   scrape:
     runs-on: ubuntu-latest
